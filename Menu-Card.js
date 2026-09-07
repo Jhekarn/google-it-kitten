@@ -192,16 +192,22 @@ function buildSelectionMessage(faqs) {
   return buildFaqResultsMessage('your selection', faqs);
 }
 
-// Foundation placeholder answers. Replaced step by step by the ported features.
-const placeholderAnswers = {
+// Menu answers, ported from Slack's Menu-Buttons.js.
+// WiFi passwords come from env (repo is public!): WIFI_PW_BERLIN,
+// WIFI_PW_VALENCIA, WIFI_PW_GUEST — set them on Render.
+const menuAnswers = {
   option_2:
     'IT Knowledge base:\nhttps://urbansportsclub.atlassian.net/wiki/spaces/CIA/pages/1534033928/CIA+Help+Center\n' +
     '<i>Tip:</i> Check your Chrome USC folder for more sections.',
   option_3:
     'We <b>do not</b> process access via Jira. Use <b>Okta Access Request</b> in the Okta portal.\n' +
     'Details: https://urbansportsclub.atlassian.net/wiki/spaces/CIA/pages/2660990977/Request+and+approve+Okta+accesses+for+SaaS+apps',
-  option_5:
-    '🚧 <i>Foundation phase:</i> the WiFi answer will be ported in a later step.',
+  option_5: () =>
+    `The Password for the office in <b>Berlin</b> is <b>${process.env.WIFI_PW_BERLIN || '(not configured)'}</b> ` +
+    `while the one for <b>Valencia</b> is <b>${process.env.WIFI_PW_VALENCIA || '(not configured)'}</b>.\n\n` +
+    `<b>However,</b> if you have guests please let them sign in to the <b>guest network</b> using ` +
+    `<b>${process.env.WIFI_PW_GUEST || '(not configured)'}</b> as the password.\n` +
+    `Please <b>do not</b> share the internal password with guests.`,
   open_jira_modal:
     '🚧 <i>Foundation phase:</i> the Jira ticket dialog will be ported in a later step.',
   option_6:
@@ -209,10 +215,9 @@ const placeholderAnswers = {
 };
 
 function answerTextFor(functionName) {
-  return (
-    placeholderAnswers[functionName] ||
-    'Hmm. I’m not sure how to help with that yet. 💥'
-  );
+  const answer = menuAnswers[functionName];
+  if (typeof answer === 'function') return answer();
+  return answer || 'Hmm. I’m not sure how to help with that yet. 💥';
 }
 
 // The "Submit FAQ" dialog card (Chat's modal).
