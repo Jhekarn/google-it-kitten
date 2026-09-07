@@ -92,10 +92,25 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
         header: 'Search for help',
         widgets: [
           {
+            // Live autocomplete (Slack external_select equivalent):
+            // typing triggers faq_autocomplete, picking triggers faq_selected
+            selectionInput: {
+              name: 'faq_select',
+              type: 'MULTI_SELECT',
+              label: '🔎 Start typing to search the FAQ...',
+              multiSelectMaxSelectedItems: 3,
+              multiSelectMinQueryLength: 2,
+              externalDataSource: buttonAction('faq_autocomplete').action,
+              onChangeAction: buttonAction('faq_selected').action
+            }
+          },
+          {
+            // Classic keyword search — Enter in the field also triggers it
             textInput: {
               label: 'Keyword (e.g. printer, vpn, password)',
               type: 'SINGLE_LINE',
-              name: 'faq_query'
+              name: 'faq_query',
+              onChangeAction: buttonAction('faq_search').action
             }
           },
           {
@@ -174,6 +189,19 @@ function buildFaqResultsMessage(query, matches) {
     `Results for "<b>${query}</b>" — click one:`,
     [resultButtons]
   );
+}
+
+// Message after the user picked FAQ(s) from the autocomplete dropdown:
+// a single text answer is shown directly; link-only or multiple picks
+// become buttons (link-only ones open the page directly, new tab).
+function buildSelectionMessage(faqs) {
+  if (!faqs.length) {
+    return buildHelpMessage('Hmm. I couldn’t find that FAQ anymore. 💥 Try the search again.');
+  }
+  if (faqs.length === 1 && !isLinkOnlyAnswer(faqs[0].responseText)) {
+    return buildAnswerMessage(faqs[0].responseText);
+  }
+  return buildFaqResultsMessage('your selection', faqs);
 }
 
 // Foundation placeholder answers. Replaced step by step by the ported features.
@@ -281,6 +309,7 @@ module.exports = {
   buildHelpCardObject,
   buildAnswerMessage,
   buildFaqResultsMessage,
+  buildSelectionMessage,
   buildFaqDialogCardObject,
   answerTextFor,
   wrappers
