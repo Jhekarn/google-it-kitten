@@ -208,10 +208,6 @@ const menuAnswers = {
     `<b>However,</b> if you have guests please let them sign in to the <b>guest network</b> using ` +
     `<b>${process.env.WIFI_PW_GUEST || '(not configured)'}</b> as the password.\n` +
     `Please <b>do not</b> share the internal password with guests.`,
-  open_jira_modal:
-    '🚧 <i>Foundation phase:</i> the Jira ticket dialog will be ported in a later step.',
-  option_6:
-    '🚧 <i>Foundation phase:</i> "My Open Jira Tickets" will be ported in a later step.'
 };
 
 function answerTextFor(functionName) {
