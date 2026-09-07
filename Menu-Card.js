@@ -379,6 +379,7 @@ function wrappers(isAddon) {
 }
 
 module.exports = {
+  buttonAction,
   buildHelpMessage,
   buildHelpCardObject,
   buildAnswerMessage,
