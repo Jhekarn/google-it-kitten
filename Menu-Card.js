@@ -10,6 +10,20 @@
 //   close dialog  → action.navigations[].endNavigation + notification
 // (The old classic wrappers are also provided for the local test script.)
 
+// In the add-on format, onClick.action.function must be the ENDPOINT URL of
+// this app — the logical action name travels in action.parameters.actionName.
+// We reuse CHAT_APP_AUDIENCE (the /chat URL) as that endpoint.
+const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
+
+function buttonAction(actionName) {
+  return {
+    action: {
+      function: ACTION_ENDPOINT,
+      parameters: [{ key: 'actionName', value: actionName }]
+    }
+  };
+}
+
 // The six menu buttons — same order & ids as in Slack's Menu-Buttons.js
 const menuButtons = [
   { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal' },   // option_1
@@ -35,7 +49,7 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
             buttonList: {
               buttons: menuButtons.map(b => ({
                 text: b.text,
-                onClick: { action: { function: b.functionName } }
+                onClick: buttonAction(b.functionName)
               }))
             }
           }
@@ -105,7 +119,7 @@ function buildFaqDialogCardObject() {
               buttons: [
                 {
                   text: 'Submit',
-                  onClick: { action: { function: 'faq_dialog_submit' } }
+                  onClick: buttonAction('faq_dialog_submit')
                 }
               ]
             }
