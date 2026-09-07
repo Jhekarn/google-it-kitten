@@ -183,7 +183,11 @@ function buildSelectionMessage(faqs) {
     return buildHelpMessage('Hmm. I couldn’t find that FAQ anymore. 💥 Try the search again.');
   }
   if (faqs.length === 1 && !isLinkOnlyAnswer(faqs[0].responseText)) {
-    return buildAnswerMessage(faqs[0].responseText);
+    const txt = (faqs[0].responseText || '').trim();
+    if (!txt) {
+      return buildHelpMessage(`ℹ️ "<b>${faqs[0].suggestion}</b>" has no help text stored in the FAQ DB yet. Please tell Marcus Gallein.`);
+    }
+    return buildAnswerMessage(txt);
   }
   return buildFaqResultsMessage('your selection', faqs);
 }
