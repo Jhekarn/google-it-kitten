@@ -65,10 +65,19 @@ function normalizeEvent(body) {
       return { isAddon: true, kind: 'message', message: c.messagePayload.message, space: c.messagePayload.space, user: c.user };
     }
     if (c.buttonClickedPayload) {
+      // Action name travels in commonEventObject.parameters.actionName
+      // (parameters can be a map {actionName: 'x'} or an array [{key,value}])
+      let actionName = common.invokedFunction;
+      const p = common.parameters;
+      if (!actionName && p) {
+        actionName = Array.isArray(p)
+          ? p.find(e => e.key === 'actionName')?.value
+          : p.actionName;
+      }
       return {
         isAddon: true,
         kind: 'click',
-        fn: common.invokedFunction,
+        fn: actionName,
         formInputs: common.formInputs,
         isDialogEvent: !!c.buttonClickedPayload.isDialogEvent,
         user: c.user
