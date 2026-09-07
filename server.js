@@ -24,6 +24,8 @@ const {
   buildSelectionMessage,
   buildFaqDialogCardObject,
   answerTextFor,
+  extractUrls,
+  isLinkOnlyAnswer,
   wrappers
 } = require('./Menu-Card');
 const { appendFAQToSheet } = require('./GoogleSheet-Handler');
@@ -186,6 +188,13 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           try {
             const matches = await searchFAQs(ev.query);
             suggestions = matches.slice(0, 25).map(f => ({ text: f.suggestion, value: f.value }));
+            // More than one hit → offer a "show all results" entry on top
+            if (matches.length > 1) {
+              suggestions.unshift({
+                text: `📋 Show all ${matches.length} results for "${ev.query}"`,
+                value: `__all__:${ev.query}`
+              });
+            }
             console.log(`🔎 autocomplete "${ev.query}" → ${suggestions.length} item(s)`);
           } catch (err) {
             console.error('❌ Autocomplete failed:', err.message);
@@ -225,9 +234,26 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'faq_selected': {
             try {
               const values = ev.formInputs?.faq_select?.stringInputs?.value || [];
-              const faqs = (await Promise.all(values.map(v => findFAQ(v)))).filter(Boolean);
               console.log(`🔽 FAQ selected: ${values.join(', ') || '(none)'}`);
+
+              // "Show all results" pseudo-entry picked → list all matches
+              const allSel = values.find(v => v.startsWith('__all__:'));
+              if (allSel) {
+                const query = allSel.slice('__all__:'.length);
+                const matches = await searchFAQs(query);
+                return res.json(w.updateMessage(buildFaqResultsMessage(query, matches)));
+              }
+
+              const faqs = (await Promise.all(values.map(v => findFAQ(v)))).filter(Boolean);
               if (!faqs.length) return res.json(w.updateMessage(buildHelpMessage()));
+
+              // Single link-only pick → try to open the page DIRECTLY
+              if (faqs.length === 1 && isLinkOnlyAnswer(faqs[0].responseText)) {
+                const url = extractUrls(faqs[0].responseText)[0];
+                console.log(`🔗 direct-open attempt: ${url}`);
+                return res.json({ action: { links: [{ openLink: { url } }] } });
+              }
+
               return res.json(w.updateMessage(buildSelectionMessage(faqs)));
             } catch (err) {
               console.error('❌ FAQ selection failed:', err.message);
