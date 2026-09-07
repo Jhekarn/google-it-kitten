@@ -1,6 +1,6 @@
 // Jira-MyTickets.js — "My Open Jira Tickets" (ported from the Slack version).
 // Fetches all open tickets reported by the user across all projects and
-// renders them as one card text with clickable links.
+// renders them as paginated card text with clickable links.
 
 const axios = require('axios');
 
@@ -25,7 +25,7 @@ async function getUserOpenTickets(email) {
       jql,
       fields: ['summary', 'key', 'status', 'assignee'],
       fieldsByKeys: true,
-      maxResults: 50
+      maxResults: 100
     },
     config
   );
@@ -39,22 +39,29 @@ async function getUserOpenTickets(email) {
   }));
 }
 
-// Render the ticket list as Chat card text (links clickable)
-function buildMyTicketsText(tickets) {
+// Render one PAGE of the ticket list as Chat card text (links clickable).
+// Returns { text, page, totalPages } for the pagination buttons.
+const PAGE_SIZE = 15;
+
+function buildMyTicketsPage(tickets, page = 0) {
   if (!tickets.length) {
-    return '📭 You have no open Jira tickets.';
+    return { text: '📭 You have no open Jira tickets.', page: 0, totalPages: 1 };
   }
 
-  const MAX_SHOWN = 15;
-  const lines = tickets.slice(0, MAX_SHOWN).map(t =>
+  const totalPages = Math.ceil(tickets.length / PAGE_SIZE);
+  const p = Math.min(Math.max(0, page), totalPages - 1);
+  const slice = tickets.slice(p * PAGE_SIZE, (p + 1) * PAGE_SIZE);
+
+  const lines = slice.map(t =>
     `• <a href="${t.url}">${t.key}</a> — ${t.summary} <i>(Status: ${t.status}, Assignee: ${t.assignee})</i>`
   );
 
-  let text = `📋 <b>Your open Jira tickets across all projects:</b>\n\n` + lines.join('\n');
-  if (tickets.length > MAX_SHOWN) {
-    text += `\n\n…and ${tickets.length - MAX_SHOWN} more.`;
-  }
-  return text;
+  const header =
+    totalPages > 1
+      ? `📋 <b>Your open Jira tickets (${tickets.length} total — page ${p + 1} of ${totalPages}):</b>`
+      : `📋 <b>Your open Jira tickets across all projects:</b>`;
+
+  return { text: `${header}\n\n` + lines.join('\n'), page: p, totalPages };
 }
 
-module.exports = { getUserOpenTickets, buildMyTicketsText };
+module.exports = { getUserOpenTickets, buildMyTicketsPage, PAGE_SIZE };
