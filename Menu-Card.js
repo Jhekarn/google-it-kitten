@@ -296,5 +296,7 @@ module.exports = {
   buildSelectionMessage,
   buildFaqDialogCardObject,
   answerTextFor,
+  extractUrls,
+  isLinkOnlyAnswer,
   wrappers
 };
