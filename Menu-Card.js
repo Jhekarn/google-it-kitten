@@ -61,7 +61,7 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
     sections: [
       {
         widgets: [
-          { textParagraph: { text: headerText } },
+          { textParagraph: { text: toChatHtml(headerText) } },
           ...extraWidgets
         ]
       },
