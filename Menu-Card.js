@@ -103,22 +103,6 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
               externalDataSource: buttonAction('faq_autocomplete').action,
               onChangeAction: buttonAction('faq_selected').action
             }
-          },
-          {
-            // Classic keyword search — Enter in the field also triggers it
-            textInput: {
-              label: 'Keyword (e.g. printer, vpn, password)',
-              type: 'SINGLE_LINE',
-              name: 'faq_query',
-              onChangeAction: buttonAction('faq_search').action
-            }
-          },
-          {
-            buttonList: {
-              buttons: [
-                { text: '🔎 Search FAQ', onClick: buttonAction('faq_search') }
-              ]
-            }
           }
         ]
       },
