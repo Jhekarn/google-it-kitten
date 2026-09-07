@@ -247,7 +247,9 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               const faqs = (await Promise.all(values.map(v => findFAQ(v)))).filter(Boolean);
               if (!faqs.length) return res.json(w.updateMessage(buildHelpMessage()));
 
-              return res.json(w.updateMessage(buildSelectionMessage(faqs)));
+              const response = w.updateMessage(buildSelectionMessage(faqs));
+              if (process.env.ENABLE_DEBUG_EVENTS === '1') console.log('📤 RESPONSE:', JSON.stringify(response).slice(0, 500));
+              return res.json(response);
               
             } catch (err) {
               console.error('❌ FAQ selection failed:', err.message);
