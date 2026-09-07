@@ -23,6 +23,7 @@ const {
   answerTextFor,
   wrappers
 } = require('./Menu-Card');
+const { appendFAQToSheet } = require('./GoogleSheet-Handler');
 
 const app = express();
 app.use(express.json());
@@ -160,11 +161,22 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             return res.json(w.openDialog(buildFaqDialogCardObject()));
 
           case 'faq_dialog_submit': {
-            const title = ev.formInputs?.faq_title?.stringInputs?.value?.[0] || '(empty)';
-            const helptext = ev.formInputs?.faq_helptext?.stringInputs?.value?.[0] || '';
-            return res.json(w.closeDialog(
-              `✅ Dialog works! Received: "${title}" — Google Sheet saving comes in a later step. (${helptext.length} chars help text)`
-            ));
+            const title = (ev.formInputs?.faq_title?.stringInputs?.value?.[0] || '').trim();
+            const helptext = (ev.formInputs?.faq_helptext?.stringInputs?.value?.[0] || '').trim();
+            const requester = ev.user?.displayName || ev.user?.email || 'unknown';
+
+            if (!title || !helptext) {
+              return res.json(w.closeDialog('⚠️ Please fill in both fields — your FAQ was NOT saved. Open the dialog and try again.'));
+            }
+
+            try {
+              await appendFAQToSheet(title, helptext, requester);
+              console.log(`✅ FAQ saved to sheet: "${title}" by ${requester}`);
+              return res.json(w.closeDialog(`✅ Your FAQ was submitted: "${title}" — thanks, ${requester}!`));
+            } catch (err) {
+              console.error('❌ Failed to write FAQ to sheet:', err.message);
+              return res.json(w.closeDialog('⚠️ Something went wrong saving your FAQ. Please tell Marcus Gallein.'));
+            }
           }
 
           // All other menu buttons → update the message with (placeholder) answer + menu
