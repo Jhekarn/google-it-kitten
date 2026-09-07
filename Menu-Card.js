@@ -15,10 +15,10 @@
 // We reuse CHAT_APP_AUDIENCE (the /chat URL) as that endpoint.
 const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
-function buttonAction(actionName, opensDialog = false) {
+function buttonAction(actionName, opensDialog = false, extraParams = []) {
   const action = {
     function: ACTION_ENDPOINT,
-    parameters: [{ key: 'actionName', value: actionName }]
+    parameters: [{ key: 'actionName', value: actionName }, ...extraParams]
   };
   // Buttons that open a dialog MUST declare it, or Chat rejects the response
   if (opensDialog) action.interaction = 'OPEN_DIALOG';
@@ -35,8 +35,10 @@ const menuButtons = [
   { text: '📋 My Open Jira Tickets',         functionName: 'option_6' }
 ];
 
-// The inner card (Cards v2 "card" object)
-function buildHelpCardObject(headerText = 'Hi there! What do you need help with?') {
+// The inner card (Cards v2 "card" object).
+// extraWidgets are rendered between the header text and the FAQ search —
+// used for FAQ search results.
+function buildHelpCardObject(headerText = 'Hi there! What do you need help with?', extraWidgets = []) {
   return {
     header: {
       title: 'IT Kitten 🐱',
@@ -46,6 +48,30 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
       {
         widgets: [
           { textParagraph: { text: headerText } },
+          ...extraWidgets
+        ]
+      },
+      {
+        header: 'Search for help',
+        widgets: [
+          {
+            textInput: {
+              label: 'Keyword (e.g. printer, vpn, password)',
+              type: 'SINGLE_LINE',
+              name: 'faq_query'
+            }
+          },
+          {
+            buttonList: {
+              buttons: [
+                { text: '🔎 Search FAQ', onClick: buttonAction('faq_search') }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        widgets: [
           {
             buttonList: {
               buttons: menuButtons.map(b => ({
@@ -61,13 +87,34 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
 }
 
 // A complete Chat "message" object with the help card
-function buildHelpMessage(headerText) {
+function buildHelpMessage(headerText, extraWidgets = []) {
   return {
     text: 'IT Kitten help menu',
     cardsV2: [
-      { cardId: 'kitten_help_menu', card: buildHelpCardObject(headerText) }
+      { cardId: 'kitten_help_menu', card: buildHelpCardObject(headerText, extraWidgets) }
     ]
   };
+}
+
+// FAQ search results: matching FAQ titles as buttons (click → answer)
+function buildFaqResultsMessage(query, matches) {
+  if (!matches.length) {
+    return buildHelpMessage(`Hmm. I found nothing for "<b>${query}</b>". 💥 Try another keyword.`);
+  }
+
+  const resultButtons = {
+    buttonList: {
+      buttons: matches.slice(0, 10).map(f => ({
+        text: `💡 ${f.suggestion}`,
+        onClick: buttonAction('faq_answer', false, [{ key: 'faq_value', value: f.value }])
+      }))
+    }
+  };
+
+  return buildHelpMessage(
+    `Results for "<b>${query}</b>" — click one:`,
+    [resultButtons]
+  );
 }
 
 // Foundation placeholder answers. Replaced step by step by the ported features.
@@ -93,8 +140,7 @@ function answerTextFor(functionName) {
   );
 }
 
-// The "Submit FAQ" dialog card (Chat's modal). Submit only echoes for now —
-// the Google Sheet write is ported in step 2.
+// The "Submit FAQ" dialog card (Chat's modal).
 function buildFaqDialogCardObject() {
   return {
     sections: [
@@ -174,6 +220,7 @@ function wrappers(isAddon) {
 module.exports = {
   buildHelpMessage,
   buildHelpCardObject,
+  buildFaqResultsMessage,
   buildFaqDialogCardObject,
   answerTextFor,
   wrappers
