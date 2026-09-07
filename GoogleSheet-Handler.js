@@ -48,4 +48,4 @@ async function appendFAQToSheet(title, helptext, requester) {
   });
 }
 
-module.exports = { appendFAQToSheet };
+module.exports = { appendFAQToSheet, getSheetsClient };
