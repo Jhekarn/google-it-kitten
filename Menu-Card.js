@@ -1,10 +1,14 @@
 // Menu-Card.js — the Kitten help menu as a Google Chat "Cards v2" card.
-// This is the Google Chat equivalent of Menu-Buttons.js + getHelpMenu() from the
-// Slack version. Same action ids are kept (open_jira_modal, option_2, ...) so the
-// feature porting in the next steps maps 1:1 to the old code.
+// Google Chat equivalent of Menu-Buttons.js + getHelpMenu() from the Slack
+// version. Same action ids (open_jira_modal, option_2, ...) so feature porting
+// maps 1:1 to the old code.
 //
-// NOTE (foundation phase): all buttons work and answer, but with placeholder
-// texts where the real feature (Jira, Sheets, ...) is not ported yet.
+// This app runs in Google's NEW add-on event format, so responses are wrapped:
+//   new message   → hostAppDataAction.chatDataAction.createMessageAction
+//   update msg    → hostAppDataAction.chatDataAction.updateMessageAction
+//   open dialog   → action.navigations[].pushCard
+//   close dialog  → action.navigations[].endNavigation + notification
+// (The old classic wrappers are also provided for the local test script.)
 
 // The six menu buttons — same order & ids as in Slack's Menu-Buttons.js
 const menuButtons = [
@@ -16,45 +20,42 @@ const menuButtons = [
   { text: '📋 My Open Jira Tickets',         functionName: 'option_6' }
 ];
 
-// Build the help-menu card. `headerText` lets us swap the intro line when we
-// update the card with an answer (same pattern as respondInChat in Slack).
-function buildHelpCard(headerText = 'Hi there! What do you need help with?') {
+// The inner card (Cards v2 "card" object)
+function buildHelpCardObject(headerText = 'Hi there! What do you need help with?') {
   return {
-    cardsV2: [
+    header: {
+      title: 'IT Kitten 🐱',
+      subtitle: 'USC internal IT helper'
+    },
+    sections: [
       {
-        cardId: 'kitten_help_menu',
-        card: {
-          header: {
-            title: 'IT Kitten 🐱',
-            subtitle: 'USC internal IT helper'
-          },
-          sections: [
-            {
-              widgets: [
-                { textParagraph: { text: headerText } },
-                {
-                  buttonList: {
-                    buttons: menuButtons.map(b => ({
-                      text: b.text,
-                      onClick: {
-                        action: {
-                          function: b.functionName
-                        }
-                      }
-                    }))
-                  }
-                }
-              ]
+        widgets: [
+          { textParagraph: { text: headerText } },
+          {
+            buttonList: {
+              buttons: menuButtons.map(b => ({
+                text: b.text,
+                onClick: { action: { function: b.functionName } }
+              }))
             }
-          ]
-        }
+          }
+        ]
       }
     ]
   };
 }
 
-// Foundation placeholder answers. In the coming steps these get replaced by the
-// real ported logic (Jira modal → Chat dialog, Sheets lookup, etc.).
+// A complete Chat "message" object with the help card
+function buildHelpMessage(headerText) {
+  return {
+    text: 'IT Kitten help menu',
+    cardsV2: [
+      { cardId: 'kitten_help_menu', card: buildHelpCardObject(headerText) }
+    ]
+  };
+}
+
+// Foundation placeholder answers. Replaced step by step by the ported features.
 const placeholderAnswers = {
   option_2:
     'IT Knowledge base:\nhttps://urbansportsclub.atlassian.net/wiki/spaces/CIA/pages/1534033928/CIA+Help+Center\n' +
@@ -70,93 +71,95 @@ const placeholderAnswers = {
     '🚧 <i>Foundation phase:</i> "My Open Jira Tickets" will be ported in a later step.'
 };
 
-// Build an "update the existing message" response (Slack chat.update equivalent):
-// the card is re-rendered with the answer text on top and the menu below it.
-function buildAnswerResponse(functionName) {
-  const answer =
+function answerTextFor(functionName) {
+  return (
     placeholderAnswers[functionName] ||
-    'Hmm. I’m not sure how to help with that yet. 💥';
-
-  return {
-    actionResponse: { type: 'UPDATE_MESSAGE' },
-    ...buildHelpCard(answer)
-  };
+    'Hmm. I’m not sure how to help with that yet. 💥'
+  );
 }
 
-// The "Submit FAQ" dialog — Google Chat's equivalent of the Slack modal.
-// Included already in the foundation to prove that dialogs work end-to-end.
-// On submit it only echoes the values back (no Google Sheet write yet).
-function buildFaqDialogResponse() {
+// The "Submit FAQ" dialog card (Chat's modal). Submit only echoes for now —
+// the Google Sheet write is ported in step 2.
+function buildFaqDialogCardObject() {
   return {
-    actionResponse: {
-      type: 'DIALOG',
-      dialogAction: {
-        dialog: {
-          body: {
-            sections: [
-              {
-                header: 'Submit FAQ',
-                widgets: [
-                  {
-                    textInput: {
-                      label: 'FAQ Title',
-                      type: 'SINGLE_LINE',
-                      name: 'faq_title'
-                    }
-                  },
-                  {
-                    textInput: {
-                      label: 'Help Text for Users',
-                      type: 'MULTIPLE_LINE',
-                      name: 'faq_helptext'
-                    }
-                  },
-                  {
-                    buttonList: {
-                      buttons: [
-                        {
-                          text: 'Submit',
-                          onClick: {
-                            action: {
-                              function: 'faq_dialog_submit'
-                            }
-                          }
-                        }
-                      ]
-                    }
-                  }
-                ]
-              }
-            ]
+    sections: [
+      {
+        header: 'Submit FAQ',
+        widgets: [
+          {
+            textInput: {
+              label: 'FAQ Title',
+              type: 'SINGLE_LINE',
+              name: 'faq_title'
+            }
+          },
+          {
+            textInput: {
+              label: 'Help Text for Users',
+              type: 'MULTIPLE_LINE',
+              name: 'faq_helptext'
+            }
+          },
+          {
+            buttonList: {
+              buttons: [
+                {
+                  text: 'Submit',
+                  onClick: { action: { function: 'faq_dialog_submit' } }
+                }
+              ]
+            }
           }
-        }
+        ]
       }
-    }
+    ]
   };
 }
 
-// Close the dialog with a confirmation (foundation: echo only, no Sheet write yet).
-function buildFaqDialogSubmitResponse(formInputs) {
-  const title = formInputs?.faq_title?.stringInputs?.value?.[0] || '(empty)';
-  const helptext = formInputs?.faq_helptext?.stringInputs?.value?.[0] || '(empty)';
+// ---------- Response wrappers: NEW add-on format ----------
 
-  return {
+const addon = {
+  newMessage: message => ({
+    hostAppDataAction: { chatDataAction: { createMessageAction: { message } } }
+  }),
+  updateMessage: message => ({
+    hostAppDataAction: { chatDataAction: { updateMessageAction: { message } } }
+  }),
+  openDialog: cardObject => ({
+    action: { navigations: [{ pushCard: cardObject }] }
+  }),
+  closeDialog: notificationText => ({
+    action: {
+      navigations: [{ endNavigation: { action: 'CLOSE_DIALOG' } }],
+      notification: { text: notificationText }
+    }
+  })
+};
+
+// ---------- Response wrappers: classic format (local test script) ----------
+
+const classic = {
+  newMessage: message => message,
+  updateMessage: message => ({ actionResponse: { type: 'UPDATE_MESSAGE' }, ...message }),
+  openDialog: cardObject => ({
+    actionResponse: { type: 'DIALOG', dialogAction: { dialog: { body: cardObject } } }
+  }),
+  closeDialog: notificationText => ({
     actionResponse: {
       type: 'DIALOG',
-      dialogAction: {
-        actionStatus: {
-          statusCode: 'OK',
-          userFacingMessage:
-            `✅ Dialog works! Received: "${title}" — Google Sheet saving comes in a later step. (${helptext.length} chars help text)`
-        }
-      }
+      dialogAction: { actionStatus: { statusCode: 'OK', userFacingMessage: notificationText } }
     }
-  };
+  })
+};
+
+function wrappers(isAddon) {
+  return isAddon ? addon : classic;
 }
 
 module.exports = {
-  buildHelpCard,
-  buildAnswerResponse,
-  buildFaqDialogResponse,
-  buildFaqDialogSubmitResponse
+  buildHelpMessage,
+  buildHelpCardObject,
+  buildFaqDialogCardObject,
+  answerTextFor,
+  wrappers
 };
