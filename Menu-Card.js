@@ -25,6 +25,20 @@ function buttonAction(actionName, opensDialog = false, extraParams = []) {
   return { action };
 }
 
+// Make URLs in answer texts clickable in Chat cards:
+//  - Slack-style links <https://url|Label>  → <a href="url">Label</a>
+//  - bare URLs                              → <a href="url">url</a>
+// Existing <a href> markup is left untouched.
+function toChatHtml(text) {
+  if (!text) return text;
+  let out = text.replace(/<(https?:\/\/[^|>\s]+)\|([^>]+)>/g, '<a href="$1">$2</a>');
+  out = out.replace(
+    /(^|[^"'>=\w])(https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?])/g,
+    '$1<a href="$2">$2</a>'
+  );
+  return out;
+}
+
 // The six menu buttons — same order & ids as in Slack's Menu-Buttons.js
 const menuButtons = [
   { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal' },   // option_1
