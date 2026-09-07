@@ -30,6 +30,12 @@ const {
 const app = express();
 app.use(express.json());
 
+// TEMP: log every incoming request (foundation debugging)
+app.use((req, _res, next) => {
+  console.log(`📥 ${req.method} ${req.url} | event type: ${req.body?.type || '-'} | auth header: ${req.headers.authorization ? 'yes' : 'no'}`);
+  next();
+});
+
 // ---- Health check (Render pings this; also nice for browser sanity checks) ----
 app.get('/', (_req, res) => {
   res.send('🐱 IT Kitten for Google Chat is running.');
