@@ -32,7 +32,8 @@ app.use(express.json());
 
 // TEMP: log every incoming request (foundation debugging)
 app.use((req, _res, next) => {
-  console.log(`📥 ${req.method} ${req.url} | event type: ${req.body?.type || '-'} | auth header: ${req.headers.authorization ? 'yes' : 'no'}`);
+  console.log(`📥 ${req.method} ${req.url} | auth header: ${req.headers.authorization ? 'yes' : 'no'}`);
+  if (req.method === 'POST') console.log('📦 BODY:', JSON.stringify(req.body));
   next();
 });
 
