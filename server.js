@@ -18,6 +18,7 @@ const express = require('express');
 
 const { chatAuthMiddleware } = require('./Chat-Auth');
 const {
+  buttonAction,
   buildHelpMessage,
   buildAnswerMessage,
   buildFaqResultsMessage,
@@ -33,7 +34,7 @@ const {
 const { appendFAQToSheet } = require('./GoogleSheet-Handler');
 const { searchFAQs, findFAQ } = require('./FAQ-DB');
 const { createJiraTicket } = require('./Jira');
-const { getUserOpenTickets, buildMyTicketsText } = require('./Jira-MyTickets');
+const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
 
 const app = express();
 app.use(express.json());
@@ -243,16 +244,35 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             }
           }
 
-          // 📋 My Open Jira Tickets (ported from Jira-MyTickets.js)
+          // 📋 My Open Jira Tickets (ported from Jira-MyTickets.js) — paginated
           case 'option_6': {
             const email = ev.user?.email;
             if (!email) {
               return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.')));
             }
             try {
+              const requestedPage = Number(ev.params?.page || 0);
               const tickets = await getUserOpenTickets(email);
-              console.log(`📋 My tickets for ${email}: ${tickets.length}`);
-              return res.json(w.updateMessage(buildHelpMessage(buildMyTicketsText(tickets))));
+              const { text, page, totalPages } = buildMyTicketsPage(tickets, requestedPage);
+              console.log(`📋 My tickets for ${email}: ${tickets.length} (page ${page + 1}/${totalPages})`);
+
+              // ⬅️ / ➡️ pagination buttons
+              const navButtons = [];
+              if (page > 0) {
+                navButtons.push({
+                  text: '⬅️ Previous',
+                  onClick: buttonAction('option_6', false, [{ key: 'page', value: String(page - 1) }])
+                });
+              }
+              if (page < totalPages - 1) {
+                navButtons.push({
+                  text: '➡️ Next page',
+                  onClick: buttonAction('option_6', false, [{ key: 'page', value: String(page + 1) }])
+                });
+              }
+              const extraWidgets = navButtons.length ? [{ buttonList: { buttons: navButtons } }] : [];
+
+              return res.json(w.updateMessage(buildHelpMessage(text, extraWidgets)));
             } catch (err) {
               console.error('❌ Fetching tickets failed:', err.response?.data || err.message);
               return res.json(w.updateMessage(buildHelpMessage('❌ Sorry, I couldn’t fetch your Jira tickets. Please try again later.')));
