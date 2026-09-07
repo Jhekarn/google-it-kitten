@@ -39,6 +39,29 @@ function toChatHtml(text) {
   return out;
 }
 
+// Extract all URLs from an answer text (after link normalization)
+function extractUrls(text) {
+  const html = toChatHtml(text || '');
+  const re = /https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?]/g;
+  return [...new Set(html.match(re) || [])];
+}
+
+// An answer message: text + "Open link" button(s) that open in a new tab
+function buildAnswerMessage(text) {
+  const urls = extractUrls(text).slice(0, 3);
+  const widgets = urls.length
+    ? [{
+        buttonList: {
+          buttons: urls.map((u, i) => ({
+            text: urls.length > 1 ? `🔗 Open link ${i + 1}` : '🔗 Open link',
+            onClick: { openLink: { url: u } }
+          }))
+        }
+      }]
+    : [];
+  return buildHelpMessage(text, widgets);
+}
+
 // The six menu buttons — same order & ids as in Slack's Menu-Buttons.js
 const menuButtons = [
   { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal' },   // option_1
@@ -51,7 +74,7 @@ const menuButtons = [
 
 // The inner card (Cards v2 "card" object).
 // extraWidgets are rendered between the header text and the FAQ search —
-// used for FAQ search results.
+// used for FAQ search results and answer link buttons.
 function buildHelpCardObject(headerText = 'Hi there! What do you need help with?', extraWidgets = []) {
   return {
     header: {
@@ -110,7 +133,21 @@ function buildHelpMessage(headerText, extraWidgets = []) {
   };
 }
 
-// FAQ search results: matching FAQ titles as buttons (click → answer)
+// True when an FAQ answer is essentially just a link (no real text around it)
+function isLinkOnlyAnswer(responseText) {
+  const urls = extractUrls(responseText);
+  if (urls.length !== 1) return false;
+  const stripped = (responseText || '')
+    .replace(/<[^>]*>/g, ' ')                 // markup incl. Slack-style links
+    .replace(/https?:\/\/[^\s<>"']+/g, ' ')   // the URL itself
+    .replace(/[\s:,.\-–—>]+/g, ' ')
+    .trim();
+  return stripped.length < 10;
+}
+
+// FAQ search results: matching FAQ titles as buttons.
+// Link-only answers open the page DIRECTLY (new tab); text answers show
+// the answer card (which itself carries an Open-link button when needed).
 function buildFaqResultsMessage(query, matches) {
   if (!matches.length) {
     return buildHelpMessage(`Hmm. I found nothing for "<b>${query}</b>". 💥 Try another keyword.`);
@@ -118,10 +155,18 @@ function buildFaqResultsMessage(query, matches) {
 
   const resultButtons = {
     buttonList: {
-      buttons: matches.slice(0, 10).map(f => ({
-        text: `💡 ${f.suggestion}`,
-        onClick: buttonAction('faq_answer', false, [{ key: 'faq_value', value: f.value }])
-      }))
+      buttons: matches.slice(0, 10).map(f => {
+        if (isLinkOnlyAnswer(f.responseText)) {
+          return {
+            text: `🔗 ${f.suggestion}`,
+            onClick: { openLink: { url: extractUrls(f.responseText)[0] } }
+          };
+        }
+        return {
+          text: `💡 ${f.suggestion}`,
+          onClick: buttonAction('faq_answer', false, [{ key: 'faq_value', value: f.value }])
+        };
+      })
     }
   };
 
@@ -234,6 +279,7 @@ function wrappers(isAddon) {
 module.exports = {
   buildHelpMessage,
   buildHelpCardObject,
+  buildAnswerMessage,
   buildFaqResultsMessage,
   buildFaqDialogCardObject,
   answerTextFor,
