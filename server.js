@@ -19,6 +19,7 @@ const express = require('express');
 const { chatAuthMiddleware } = require('./Chat-Auth');
 const {
   buildHelpMessage,
+  buildAnswerMessage,
   buildFaqResultsMessage,
   buildFaqDialogCardObject,
   answerTextFor,
@@ -182,7 +183,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             try {
               const faq = await findFAQ(ev.params?.faq_value);
               const responseText = faq?.responseText || 'Hmm. I’m not sure how to help with that yet. 💥';
-              return res.json(w.updateMessage(buildHelpMessage(responseText)));
+              return res.json(w.updateMessage(buildAnswerMessage(responseText)));
             } catch (err) {
               console.error('❌ FAQ lookup failed:', err.message);
               return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.')));
@@ -208,9 +209,9 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             }
           }
 
-          // All other menu buttons → update the message with (placeholder) answer + menu
+          // All other menu buttons → update the message with answer + menu
           default:
-            return res.json(w.updateMessage(buildHelpMessage(answerTextFor(ev.fn))));
+            return res.json(w.updateMessage(buildAnswerMessage(answerTextFor(ev.fn))));
         }
       }
 
