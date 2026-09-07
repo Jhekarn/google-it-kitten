@@ -30,7 +30,7 @@ const menuButtons = [
   { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal' },   // option_1
   { text: '❓ HowTo section',                functionName: 'option_2' },
   { text: '⚒️ Request accounts',             functionName: 'option_3' },
-  { text: '📄 Submit a New FAQ',             functionName: 'trigger_faq_modal' }, // option_4
+  { text: '📄 Submit a New FAQ',             functionName: 'trigger_faq_modal', opensDialog: true }, // option_4
   { text: '📶 What is the wifi password?',   functionName: 'option_5' },
   { text: '📋 My Open Jira Tickets',         functionName: 'option_6' }
 ];
@@ -50,7 +50,7 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
             buttonList: {
               buttons: menuButtons.map(b => ({
                 text: b.text,
-                onClick: buttonAction(b.functionName)
+                onClick: buttonAction(b.functionName, b.opensDialog)
               }))
             }
           }
