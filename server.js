@@ -1,4 +1,4 @@
-// server.js — google-it-kitten foundation
+// server.js — google-it-kitten
 //
 // Google Chat version of the IT Kitten Bot. Google PUSHES events to this
 // public HTTPS endpoint:
@@ -19,11 +19,13 @@ const express = require('express');
 const { chatAuthMiddleware } = require('./Chat-Auth');
 const {
   buildHelpMessage,
+  buildFaqResultsMessage,
   buildFaqDialogCardObject,
   answerTextFor,
   wrappers
 } = require('./Menu-Card');
 const { appendFAQToSheet } = require('./GoogleSheet-Handler');
+const { searchFAQs, findFAQ } = require('./FAQ-DB');
 
 const app = express();
 app.use(express.json());
@@ -66,19 +68,17 @@ function normalizeEvent(body) {
       return { isAddon: true, kind: 'message', message: c.messagePayload.message, space: c.messagePayload.space, user: c.user };
     }
     if (c.buttonClickedPayload) {
-      // Action name travels in commonEventObject.parameters.actionName
-      // (parameters can be a map {actionName: 'x'} or an array [{key,value}])
-      let actionName = common.invokedFunction;
+      // Action name + extra params travel in commonEventObject.parameters
+      // (can be a map {actionName: 'x'} or an array [{key,value}])
       const p = common.parameters;
-      if (!actionName && p) {
-        actionName = Array.isArray(p)
-          ? p.find(e => e.key === 'actionName')?.value
-          : p.actionName;
-      }
+      let params = {};
+      if (Array.isArray(p)) p.forEach(e => { params[e.key] = e.value; });
+      else if (p) params = p;
       return {
         isAddon: true,
         kind: 'click',
-        fn: actionName,
+        fn: common.invokedFunction || params.actionName,
+        params,
         formInputs: common.formInputs,
         isDialogEvent: !!c.buttonClickedPayload.isDialogEvent,
         user: c.user
@@ -105,6 +105,7 @@ function normalizeEvent(body) {
         isAddon: false,
         kind: 'click',
         fn: body.common?.invokedFunction,
+        params: {},
         formInputs: body.common?.formInputs,
         isDialogEvent: !!body.isDialogEvent,
         user: body.user
@@ -159,6 +160,34 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
         switch (ev.fn) {
           case 'trigger_faq_modal':
             return res.json(w.openDialog(buildFaqDialogCardObject()));
+
+          // 🔎 FAQ search: read the query from the card's search field
+          case 'faq_search': {
+            const query = (ev.formInputs?.faq_query?.stringInputs?.value?.[0] || '').trim();
+            if (query.length < 2) {
+              return res.json(w.updateMessage(buildHelpMessage('Please type at least 2 characters into the search field. 🔎')));
+            }
+            try {
+              const matches = await searchFAQs(query);
+              console.log(`🔎 FAQ search "${query}" → ${matches.length} match(es)`);
+              return res.json(w.updateMessage(buildFaqResultsMessage(query, matches)));
+            } catch (err) {
+              console.error('❌ FAQ search failed:', err.message);
+              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ search is unavailable right now. Please tell Marcus Gallein.')));
+            }
+          }
+
+          // 💡 FAQ answer: user clicked one of the search results
+          case 'faq_answer': {
+            try {
+              const faq = await findFAQ(ev.params?.faq_value);
+              const responseText = faq?.responseText || 'Hmm. I’m not sure how to help with that yet. 💥';
+              return res.json(w.updateMessage(buildHelpMessage(responseText)));
+            } catch (err) {
+              console.error('❌ FAQ lookup failed:', err.message);
+              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.')));
+            }
+          }
 
           case 'faq_dialog_submit': {
             const title = (ev.formInputs?.faq_title?.stringInputs?.value?.[0] || '').trim();
