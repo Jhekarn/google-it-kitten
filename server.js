@@ -21,6 +21,7 @@ const {
   buildHelpMessage,
   buildAnswerMessage,
   buildFaqResultsMessage,
+  buildSelectionMessage,
   buildFaqDialogCardObject,
   answerTextFor,
   wrappers
@@ -85,11 +86,32 @@ function normalizeEvent(body) {
         user: c.user
       };
     }
+    if (c.widgetUpdatedPayload) {
+      // Autocomplete query from a MULTI_SELECT with external data source
+      return {
+        isAddon: true,
+        kind: 'autocomplete',
+        query: (common.parameters?.autocomplete_widget_query || '').trim(),
+        user: c.user
+      };
+    }
     if (c.addedToSpacePayload) {
       return { isAddon: true, kind: 'added', space: c.addedToSpacePayload.space, user: c.user };
     }
     if (c.removedFromSpacePayload) {
       return { isAddon: true, kind: 'removed' };
+    }
+    // Fallback: some widget actions (e.g. onChangeAction) may arrive without a
+    // known payload — route them by our actionName parameter if present.
+    if (common.parameters?.actionName) {
+      return {
+        isAddon: true,
+        kind: 'click',
+        fn: common.parameters.actionName,
+        params: common.parameters,
+        formInputs: common.formInputs,
+        user: c.user
+      };
     }
     return { isAddon: true, kind: 'unknown' };
   }
@@ -157,6 +179,27 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
         return res.json(w.newMessage({ text: 'Meow! 🐱 Type *kitten* (or use /kitten) and I’ll show you what I can do.' }));
       }
 
+      // Live FAQ autocomplete: return suggestion items for the dropdown
+      case 'autocomplete': {
+        let suggestions = [];
+        if (ev.query.length >= 2) {
+          try {
+            const matches = await searchFAQs(ev.query);
+            suggestions = matches.slice(0, 25).map(f => ({ text: f.suggestion, value: f.value }));
+            console.log(`🔎 autocomplete "${ev.query}" → ${suggestions.length} item(s)`);
+          } catch (err) {
+            console.error('❌ Autocomplete failed:', err.message);
+          }
+        }
+        return res.json({
+          action: {
+            modifyOperations: [
+              { updateWidget: { selectionInputWidgetSuggestions: { suggestions } } }
+            ]
+          }
+        });
+      }
+
       case 'click': {
         switch (ev.fn) {
           case 'trigger_faq_modal':
@@ -175,6 +218,20 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             } catch (err) {
               console.error('❌ FAQ search failed:', err.message);
               return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ search is unavailable right now. Please tell Marcus Gallein.')));
+            }
+          }
+
+          // 🔽 User picked entries in the autocomplete dropdown
+          case 'faq_selected': {
+            try {
+              const values = ev.formInputs?.faq_select?.stringInputs?.value || [];
+              const faqs = (await Promise.all(values.map(v => findFAQ(v)))).filter(Boolean);
+              console.log(`🔽 FAQ selected: ${values.join(', ') || '(none)'}`);
+              if (!faqs.length) return res.json(w.updateMessage(buildHelpMessage()));
+              return res.json(w.updateMessage(buildSelectionMessage(faqs)));
+            } catch (err) {
+              console.error('❌ FAQ selection failed:', err.message);
+              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.')));
             }
           }
 
