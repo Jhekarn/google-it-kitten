@@ -64,7 +64,7 @@ function buildAnswerMessage(text) {
 
 // The six menu buttons — same order & ids as in Slack's Menu-Buttons.js
 const menuButtons = [
-  { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal' },   // option_1
+  { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal', opensDialog: true }, // option_1
   { text: '❓ HowTo section',                functionName: 'option_2' },
   { text: '⚒️ Request accounts',             functionName: 'option_3' },
   { text: '📄 Submit a New FAQ',             functionName: 'trigger_faq_modal', opensDialog: true }, // option_4
@@ -220,6 +220,91 @@ function answerTextFor(functionName) {
   return answer || 'Hmm. I’m not sure how to help with that yet. 💥';
 }
 
+// The "New Jira Ticket" dialog card — ported from Slack's open_jira_modal.
+// Same projects: IT Helpdesk (IH), SRE (SRE), DevX (DX).
+function buildJiraDialogCardObject() {
+  return {
+    sections: [
+      {
+        header: 'New Jira Ticket',
+        widgets: [
+          {
+            selectionInput: {
+              name: 'jira_project',
+              type: 'DROPDOWN',
+              label: 'Which project is this for?',
+              items: [
+                { text: 'IT Helpdesk - #it-support', value: 'IH', selected: true },
+                { text: 'SRE Team - #hive-platform-ask', value: 'SRE' },
+                { text: 'DevX Team - #hive-platform-ask', value: 'DX' }
+              ]
+            }
+          },
+          {
+            textInput: {
+              label: 'Ticket Title',
+              type: 'SINGLE_LINE',
+              name: 'jira_title'
+            }
+          },
+          {
+            textInput: {
+              label: 'Ticket Description',
+              type: 'MULTIPLE_LINE',
+              name: 'jira_desc'
+            }
+          },
+          {
+            buttonList: {
+              buttons: [
+                {
+                  text: 'Create',
+                  onClick: buttonAction('jira_dialog_submit')
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  };
+}
+
+// Confirmation message after a ticket was created (posted into the chat,
+// which also closes the dialog) — with a direct link to the ticket.
+function buildTicketCreatedMessage(ticketKey, ticketUrl) {
+  return {
+    text: `✅ Jira ticket ${ticketKey} created`,
+    cardsV2: [
+      {
+        cardId: 'jira_ticket_created',
+        card: {
+          sections: [
+            {
+              widgets: [
+                {
+                  textParagraph: {
+                    text:
+                      `✅ Your Jira ticket <b>${ticketKey}</b> has been created.\n` +
+                      `If you have any attachments, please add them directly to the ticket now.`
+                  }
+                },
+                {
+                  buttonList: {
+                    buttons: [
+                      { text: `🔗 View ${ticketKey} in Jira`, onClick: { openLink: { url: ticketUrl } } }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  };
+}
+
 // The "Submit FAQ" dialog card (Chat's modal).
 function buildFaqDialogCardObject() {
   return {
@@ -304,6 +389,8 @@ module.exports = {
   buildFaqResultsMessage,
   buildSelectionMessage,
   buildFaqDialogCardObject,
+  buildJiraDialogCardObject,
+  buildTicketCreatedMessage,
   answerTextFor,
   extractUrls,
   isLinkOnlyAnswer,
