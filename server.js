@@ -247,14 +247,8 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               const faqs = (await Promise.all(values.map(v => findFAQ(v)))).filter(Boolean);
               if (!faqs.length) return res.json(w.updateMessage(buildHelpMessage()));
 
-              // Single link-only pick → try to open the page DIRECTLY
-              if (faqs.length === 1 && isLinkOnlyAnswer(faqs[0].responseText)) {
-                const url = extractUrls(faqs[0].responseText)[0];
-                console.log(`🔗 direct-open attempt: ${url}`);
-                return res.json({ action: { links: [{ openLink: { url } }] } });
-              }
-
               return res.json(w.updateMessage(buildSelectionMessage(faqs)));
+              
             } catch (err) {
               console.error('❌ FAQ selection failed:', err.message);
               return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.')));
