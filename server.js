@@ -33,6 +33,7 @@ const {
 const { appendFAQToSheet } = require('./GoogleSheet-Handler');
 const { searchFAQs, findFAQ } = require('./FAQ-DB');
 const { createJiraTicket } = require('./Jira');
+const { getUserOpenTickets, buildMyTicketsText } = require('./Jira-MyTickets');
 
 const app = express();
 app.use(express.json());
@@ -239,6 +240,22 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             } catch (err) {
               console.error('❌ Jira ticket creation failed:', err.response?.data || err.message);
               return res.json(w.closeDialog('❌ Failed to create the Jira ticket. Please try again or contact IT.'));
+            }
+          }
+
+          // 📋 My Open Jira Tickets (ported from Jira-MyTickets.js)
+          case 'option_6': {
+            const email = ev.user?.email;
+            if (!email) {
+              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.')));
+            }
+            try {
+              const tickets = await getUserOpenTickets(email);
+              console.log(`📋 My tickets for ${email}: ${tickets.length}`);
+              return res.json(w.updateMessage(buildHelpMessage(buildMyTicketsText(tickets))));
+            } catch (err) {
+              console.error('❌ Fetching tickets failed:', err.response?.data || err.message);
+              return res.json(w.updateMessage(buildHelpMessage('❌ Sorry, I couldn’t fetch your Jira tickets. Please try again later.')));
             }
           }
 
