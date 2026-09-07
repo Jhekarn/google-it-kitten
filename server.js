@@ -23,6 +23,8 @@ const {
   buildFaqResultsMessage,
   buildSelectionMessage,
   buildFaqDialogCardObject,
+  buildJiraDialogCardObject,
+  buildTicketCreatedMessage,
   answerTextFor,
   extractUrls,
   isLinkOnlyAnswer,
@@ -30,6 +32,7 @@ const {
 } = require('./Menu-Card');
 const { appendFAQToSheet } = require('./GoogleSheet-Handler');
 const { searchFAQs, findFAQ } = require('./FAQ-DB');
+const { createJiraTicket } = require('./Jira');
 
 const app = express();
 app.use(express.json());
@@ -214,6 +217,31 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'trigger_faq_modal':
             return res.json(w.openDialog(buildFaqDialogCardObject()));
 
+          // 🎫 Jira ticket dialog (ported from Slack's open_jira_modal)
+          case 'open_jira_modal':
+            return res.json(w.openDialog(buildJiraDialogCardObject()));
+
+          case 'jira_dialog_submit': {
+            const title = (ev.formInputs?.jira_title?.stringInputs?.value?.[0] || '').trim();
+            const description = (ev.formInputs?.jira_desc?.stringInputs?.value?.[0] || '').trim();
+            const projectKey = ev.formInputs?.jira_project?.stringInputs?.value?.[0] || 'IH';
+            const reporterEmail = ev.user?.email;
+
+            if (!title || !description) {
+              return res.json(w.closeDialog('⚠️ Please fill in title AND description — no ticket was created. Please try again.'));
+            }
+
+            try {
+              const ticket = await createJiraTicket({ title, description, reporterEmail, projectKey });
+              const ticketUrl = `${process.env.JIRA_BASE_URL}/browse/${ticket.key}`;
+              console.log(`🎫 Jira ticket created: ${ticket.key} (${projectKey}) by ${reporterEmail}`);
+              return res.json(w.newMessage(buildTicketCreatedMessage(ticket.key, ticketUrl)));
+            } catch (err) {
+              console.error('❌ Jira ticket creation failed:', err.response?.data || err.message);
+              return res.json(w.closeDialog('❌ Failed to create the Jira ticket. Please try again or contact IT.'));
+            }
+          }
+
           // 🔎 FAQ search: read the query from the card's search field
           case 'faq_search': {
             const query = (ev.formInputs?.faq_query?.stringInputs?.value?.[0] || '').trim();
@@ -250,7 +278,6 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               const response = w.updateMessage(buildSelectionMessage(faqs));
               if (process.env.ENABLE_DEBUG_EVENTS === '1') console.log('📤 RESPONSE:', JSON.stringify(response).slice(0, 500));
               return res.json(response);
-              
             } catch (err) {
               console.error('❌ FAQ selection failed:', err.message);
               return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.')));
