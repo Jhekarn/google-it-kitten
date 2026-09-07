@@ -15,13 +15,14 @@
 // We reuse CHAT_APP_AUDIENCE (the /chat URL) as that endpoint.
 const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
-function buttonAction(actionName) {
-  return {
-    action: {
-      function: ACTION_ENDPOINT,
-      parameters: [{ key: 'actionName', value: actionName }]
-    }
+function buttonAction(actionName, opensDialog = false) {
+  const action = {
+    function: ACTION_ENDPOINT,
+    parameters: [{ key: 'actionName', value: actionName }]
   };
+  // Buttons that open a dialog MUST declare it, or Chat rejects the response
+  if (opensDialog) action.interaction = 'OPEN_DIALOG';
+  return { action };
 }
 
 // The six menu buttons — same order & ids as in Slack's Menu-Buttons.js
