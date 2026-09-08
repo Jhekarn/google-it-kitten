@@ -5,7 +5,7 @@
 //      VERTEX_LOCATION (default europe-west1),
 //      GEMINI_MODEL (default gemini-2.5-flash),
 //      GOOGLE_CLIENT_EMAIL / GOOGLE_PRIVATE_KEY (service account, needs the
-//      "Agent Platform user" / roles/aiplatform.user role on the project).
+//      "Agent Platform user" / roles/aiplatform.user role on the project)
 //
 // The FAQ knowledge base (FAQ-DB.js, cached 60s) is injected as context into
 // every request, so answers point people to the right internal resources.
