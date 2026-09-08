@@ -39,6 +39,7 @@ const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
 const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
 const { postOps, postToSpace: postToSpaceViaPoster } = require('./Chat-Poster');
+const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 
 // ---- Scheduled jobs (like the Slack server.js) ----
 // Every Monday 08:00 UTC (= 09:00/10:00 Berlin): weekly satisfaction report
@@ -244,9 +245,25 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
       case 'message': {
         // Keyword trigger — like the Slack regex /^(kitty|kitten)$/i.
         // argumentText = text without the @mention, so it works in DMs and spaces.
-        const text = (ev.message?.argumentText ?? ev.message?.text ?? '').trim().toLowerCase();
+        const rawText = (ev.message?.argumentText ?? ev.message?.text ?? '').trim();
+        const text = rawText.toLowerCase();
         if (text === '' || text === 'kitty' || text === 'kitten' || text === 'help') {
           return res.json(w.newMessage(buildHelpMessage()));
+        }
+
+        // 🤖 Free text → Gemini (grounded in the FAQ knowledge base).
+        // Feature is env-gated: without VERTEX_PROJECT_ID the old hint is shown.
+        if (geminiEnabled()) {
+          try {
+            const answer = await askGemini(rawText, ev.user?.displayName);
+            console.log(`🤖 Gemini answered (${rawText.slice(0, 60)}…) → ${answer.length} chars`);
+            return res.json(w.newMessage({ text: answer }));
+          } catch (err) {
+            console.error('❌ Gemini failed:', err.response?.data?.error?.message || err.message);
+            return res.json(w.newMessage({
+              text: '😿 My AI brain is unavailable right now. Type *kitten* for the classic help menu, or try again in a moment.'
+            }));
+          }
         }
         return res.json(w.newMessage({ text: 'Meow! 🐱 Type *kitten* (or use /kitten) and I’ll show you what I can do.' }));
       }
