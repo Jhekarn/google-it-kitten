@@ -1,4 +1,4 @@
-// server.js — google-it-kitten
+// server.js — google-it-kitten foundation
 //
 // Google Chat version of the IT Kitten Bot. Google PUSHES events to this
 // public HTTPS endpoint:
@@ -38,7 +38,7 @@ const { createJiraTicket } = require('./Jira');
 const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
 const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
-const { postOps, postToSpace: postToSpaceViaPoster } = require('./Chat-Poster');
+const { postOps, postToSpace: postToSpaceViaPoster, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
 const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 
 // ---- Scheduled jobs (like the Slack server.js) ----
@@ -115,7 +115,54 @@ app.get('/jobs/:job', async (req, res) => {
       await postToSpaceViaPoster(target, text);
       return res.send(`✅ Broadcast posted to ${target}.`);
     }
-    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder or /jobs/broadcast.');
+    // 🤫 DM-all: personalized "psst" DM to every user in the domain.
+    // Single-user test:   /jobs/dm-all?key=…&email=someone@urbansportsclub.com
+    // Full run (everyone): /jobs/dm-all?key=…&confirm=1
+    // The full run responds immediately and works in the background; the
+    // summary (sent / no DM channel / failed) is posted to the ops space.
+    if (req.params.job === 'dm-all') {
+      const messageFor = (firstName) =>
+        `Hey psst ${firstName || 'there'} 🐱 ...don't tell anyone, but you can also *chat with me* ` +
+        `to assist you — just send me any IT question right here. Maybe give it a try? 😉`;
+
+      // Test mode: one user only
+      if (req.query.email) {
+        const info = await getUserInfo(req.query.email);
+        const ok = await sendDm(req.query.email, messageFor(info?.firstName));
+        return res.send(ok
+          ? `✅ Test DM sent to ${req.query.email}${info?.firstName ? ` (as "${info.firstName}")` : ''}.`
+          : `❌ Could not DM ${req.query.email} — no DM channel with the Kitten yet?`);
+      }
+
+      // Safety: the full run must be confirmed explicitly
+      if (req.query.confirm !== '1') {
+        return res.status(400).send(
+          'This would DM EVERY user in the domain. Add &confirm=1 to really run it, or &email=someone@… for a single test.');
+      }
+
+      const users = await listDomainUsers();
+      res.send(`🚀 Started: DMing ${users.length} users in the background. A summary will be posted to the ops space.`);
+
+      // Continue in the background — don't block the HTTP response.
+      (async () => {
+        let sent = 0, noDm = 0, failed = 0;
+        for (const u of users) {
+          try {
+            (await sendDm(u.email, messageFor(u.firstName))) ? sent++ : noDm++;
+          } catch (err) {
+            console.warn(`⚠️ dm-all: ${u.email} failed: ${err.message}`);
+            failed++;
+          }
+          await new Promise(r => setTimeout(r, 250)); // stay well under Chat API quotas
+        }
+        const summary = `🤫 *DM-all finished:* ${sent} sent · ${noDm} without DM channel · ${failed} failed (of ${users.length} users).`;
+        console.log(summary);
+        await postOps(summary);
+      })().catch(err => postOps(`🚨 *DM-all crashed:* ${err.message}`));
+      return;
+    }
+
+    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder, /jobs/broadcast or /jobs/dm-all.');
   } catch (err) {
     console.error(`🚨 Manual job ${req.params.job} failed:`, err.message);
     return res.status(500).send(`❌ Job failed: ${err.message}`);
@@ -203,7 +250,6 @@ function normalizeEvent(body) {
         isAddon: false,
         kind: 'click',
         fn: body.common?.invokedFunction,
-        params: {},
         formInputs: body.common?.formInputs,
         isDialogEvent: !!body.isDialogEvent,
         user: body.user
@@ -434,7 +480,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             }
           }
 
-          // All other menu buttons → update the message with answer + menu
+          // All other menu buttons → update the message with (placeholder) answer + menu
           default:
             return res.json(w.updateMessage(buildAnswerMessage(answerTextFor(ev.fn))));
         }
