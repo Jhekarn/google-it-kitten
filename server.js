@@ -38,6 +38,7 @@ const { createJiraTicket } = require('./Jira');
 const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
 const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
+const { postOps } = require('./Chat-Poster');
 
 // ---- Scheduled jobs (like the Slack server.js) ----
 // Every Monday 08:00 UTC (= 09:00/10:00 Berlin): weekly satisfaction report
@@ -47,6 +48,7 @@ cron.schedule('0 8 * * 1', async () => {
     await runWeeklyReport();
   } catch (err) {
     console.error('🚨 Weekly report failed:', err.message);
+    await postOps(`🚨 *Weekly satisfaction report failed:* ${err.message}`);
   }
 });
 
@@ -58,6 +60,7 @@ cron.schedule('0 5 * * *', async () => {
     console.log('✅ Daily IH reminder completed.');
   } catch (err) {
     console.error('🚨 Daily IH reminder failed:', err.message);
+    await postOps(`🚨 *Daily IH reminder failed:* ${err.message}`);
   }
 });
 
