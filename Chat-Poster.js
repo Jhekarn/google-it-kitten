@@ -5,10 +5,13 @@
 //
 // Requirements:
 //  - The IT Kitten app must be a member of any space it posts into.
-//  - DMs only work if the user already has a DM with the app (they opened it
-//    at least once). Otherwise sendDm() returns false and callers use the fallback.
+//  - DMs need the user's NUMERIC id (app auth can't address users by email):
+//    we resolve email → id via the Admin SDK Directory API using domain-wide
+//    delegation (ADMIN_IMPERSONATE_EMAIL = a Workspace admin). The user must
+//    also have a DM with the app (auto-created by Marketplace admin install).
 //
-// Env: GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY (same service account as Sheets)
+// Env: GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY, ADMIN_IMPERSONATE_EMAIL,
+//      FALLBACK_SPACE_ID / REPORT_SPACE_ID (for postOps)
 
 const { google } = require('googleapis');
 
@@ -41,14 +44,62 @@ async function postToSpace(spaceId, text) {
   });
 }
 
-// Find the existing DM space between the app and a user (by email).
+// ---- Directory lookup: email → numeric Google user ID ----
+// App auth cannot address Chat users by email, only by users/<numeric id>.
+// We resolve the id via the Admin SDK Directory API using domain-wide
+// delegation (ADMIN_IMPERSONATE_EMAIL must be a Workspace admin).
+let directoryClient = null;
+
+function getDirectoryClient() {
+  if (directoryClient) return directoryClient;
+
+  const subject = process.env.ADMIN_IMPERSONATE_EMAIL;
+  if (!subject) return null; // delegation not configured → fall back to email
+
+  const email = process.env.GOOGLE_CLIENT_EMAIL;
+  const key = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+  const auth = new google.auth.JWT({
+    email,
+    key,
+    scopes: ['https://www.googleapis.com/auth/admin.directory.user.readonly'],
+    subject
+  });
+
+  directoryClient = google.admin({ version: 'directory_v1', auth });
+  return directoryClient;
+}
+
+const userIdCache = new Map(); // email → numeric id (per process)
+
+async function resolveUserId(emailAddr) {
+  if (userIdCache.has(emailAddr)) return userIdCache.get(emailAddr);
+
+  const dir = getDirectoryClient();
+  if (!dir) return null;
+
+  try {
+    const res = await dir.users.get({ userKey: emailAddr, fields: 'id' });
+    const id = res.data?.id || null;
+    if (id) userIdCache.set(emailAddr, id);
+    return id;
+  } catch (err) {
+    console.warn(`⚠️ Directory lookup failed for ${emailAddr}: ${err.message}`);
+    return null;
+  }
+}
+
+// Find the existing DM space between the app and a user.
+// Uses the numeric user id when resolvable (required for app auth),
+// otherwise falls back to the email form.
 async function findDmSpace(email) {
   const chat = getChatClient();
-  const res = await chat.spaces.findDirectMessage({ name: `users/${email}` });
+  const id = await resolveUserId(email);
+  const userName = id ? `users/${id}` : `users/${email}`;
+  const res = await chat.spaces.findDirectMessage({ name: userName });
   return res.data?.name || null;
 }
 
-// DM a user by email. Returns true on success, false if no DM space exists.
+// DM a user by email. Returns true on success, false if it can't be delivered.
 async function sendDm(email, text) {
   try {
     const dmSpace = await findDmSpace(email);
@@ -76,4 +127,4 @@ async function postOps(text) {
   }
 }
 
-module.exports = { postToSpace, sendDm, findDmSpace, postOps };
+module.exports = { postToSpace, sendDm, findDmSpace, postOps, resolveUserId };
