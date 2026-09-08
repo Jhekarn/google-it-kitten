@@ -110,7 +110,7 @@ app.get('/jobs/:job', async (req, res) => {
         `📶 *WiFi passwords* – I can remind you of those too.\n` +
         `📋 *My open tickets* – see all your open Jira tickets in one place.\n\n` +
         `*How to reach me:* send me a direct message with the word "kitten", ` +
-        `or mention me (@IT Kitten) / use /kitten in any space I have joined.`;
+        `or use /kitten in any space I have joined for the menu.`;
       await postToSpaceViaPoster(target, text);
       return res.send(`✅ Broadcast posted to ${target}.`);
     }
