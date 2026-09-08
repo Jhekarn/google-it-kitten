@@ -15,6 +15,7 @@
 
 require('dotenv').config();
 const express = require('express');
+const cron = require('node-cron');
 
 const { chatAuthMiddleware } = require('./Chat-Auth');
 const {
@@ -35,6 +36,30 @@ const { appendFAQToSheet } = require('./GoogleSheet-Handler');
 const { searchFAQs, findFAQ } = require('./FAQ-DB');
 const { createJiraTicket } = require('./Jira');
 const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
+const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
+const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
+
+// ---- Scheduled jobs (like the Slack server.js) ----
+// Every Monday 08:00 UTC (= 09:00/10:00 Berlin): weekly satisfaction report
+cron.schedule('0 8 * * 1', async () => {
+  console.log('⏰ Running weekly satisfaction report...');
+  try {
+    await runWeeklyReport();
+  } catch (err) {
+    console.error('🚨 Weekly report failed:', err.message);
+  }
+});
+
+// Daily 05:00 UTC: IH "waiting for customer" reminder
+cron.schedule('0 5 * * *', async () => {
+  console.log('⏰ Running daily IH reminder...');
+  try {
+    await runDailyReminder();
+    console.log('✅ Daily IH reminder completed.');
+  } catch (err) {
+    console.error('🚨 Daily IH reminder failed:', err.message);
+  }
+});
 
 const app = express();
 app.use(express.json());
@@ -53,9 +78,31 @@ app.get('/', (_req, res) => {
   res.send('🐱 IT Kitten for Google Chat is running.');
 });
 
+// ---- Manual job triggers for testing (guarded by ADMIN_JOB_KEY env) ----
+// Usage: open https://<render-url>/jobs/weekly?key=YOUR_KEY in the browser.
+app.get('/jobs/:job', async (req, res) => {
+  if (!process.env.ADMIN_JOB_KEY || req.query.key !== process.env.ADMIN_JOB_KEY) {
+    return res.status(403).send('Forbidden');
+  }
+  try {
+    if (req.params.job === 'weekly') {
+      await runWeeklyReport();
+      return res.send('✅ Weekly report executed.');
+    }
+    if (req.params.job === 'reminder') {
+      await runDailyReminder();
+      return res.send('✅ Daily reminder executed.');
+    }
+    return res.status(404).send('Unknown job. Use /jobs/weekly or /jobs/reminder.');
+  } catch (err) {
+    console.error(`🚨 Manual job ${req.params.job} failed:`, err.message);
+    return res.status(500).send(`❌ Job failed: ${err.message}`);
+  }
+});
+
 // ---- Slash command IDs (must match the Chat API console config) ----
 const COMMANDS = {
-  KITTEN: 1,      // /kitten     → help menu
+  KITTEN: 1   // /kitten → help menu
 };
 
 // ---- Normalize both event formats into one shape ----
