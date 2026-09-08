@@ -5,13 +5,10 @@
 //
 // Requirements:
 //  - The IT Kitten app must be a member of any space it posts into.
-//  - DMs need the user's NUMERIC id (app auth can't address users by email):
-//    we resolve email → id via the Admin SDK Directory API using domain-wide
-//    delegation (ADMIN_IMPERSONATE_EMAIL = a Workspace admin). The user must
-//    also have a DM with the app (auto-created by Marketplace admin install).
+//  - DMs only work if the user already has a DM with the app (they opened it
+//    at least once). Otherwise sendDm() throws and callers use the fallback.
 //
-// Env: GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY, ADMIN_IMPERSONATE_EMAIL,
-//      FALLBACK_SPACE_ID / REPORT_SPACE_ID (for postOps)
+// Env: GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY (same service account as Sheets)
 
 const { google } = require('googleapis');
 
@@ -99,7 +96,7 @@ async function findDmSpace(email) {
   return res.data?.name || null;
 }
 
-// DM a user by email. Returns true on success, false if it can't be delivered.
+// DM a user by email. Returns true on success, false if no DM space exists.
 async function sendDm(email, text) {
   try {
     const dmSpace = await findDmSpace(email);
@@ -110,6 +107,62 @@ async function sendDm(email, text) {
     console.warn(`⚠️ Could not DM ${email}: ${err.message}`);
     return false;
   }
+}
+
+// Fetch one user's Directory profile (id + names). Returns null when
+// delegation is not configured or the lookup fails.
+async function getUserInfo(emailAddr) {
+  const dir = getDirectoryClient();
+  if (!dir) return null;
+  try {
+    const res = await dir.users.get({
+      userKey: emailAddr,
+      fields: 'id,primaryEmail,name/givenName,name/fullName'
+    });
+    const u = res.data || {};
+    if (u.id && u.primaryEmail) userIdCache.set(u.primaryEmail, u.id);
+    return {
+      id: u.id || null,
+      email: u.primaryEmail || emailAddr,
+      firstName: u.name?.givenName || '',
+      fullName: u.name?.fullName || ''
+    };
+  } catch (err) {
+    console.warn(`⚠️ Directory profile lookup failed for ${emailAddr}: ${err.message}`);
+    return null;
+  }
+}
+
+// List ALL active users of the Workspace domain (Directory users.list, paginated).
+// Suspended/archived accounts are skipped. Also warms the userIdCache, so the
+// subsequent DMs don't need a second Directory call per user.
+async function listDomainUsers() {
+  const dir = getDirectoryClient();
+  if (!dir) throw new Error('ADMIN_IMPERSONATE_EMAIL not set — Directory access unavailable');
+
+  const users = [];
+  let pageToken;
+  do {
+    const res = await dir.users.list({
+      customer: 'my_customer',
+      maxResults: 500,
+      pageToken,
+      fields: 'nextPageToken,users(id,primaryEmail,name/givenName,name/fullName,suspended,archived)'
+    });
+    for (const u of res.data?.users || []) {
+      if (u.suspended || u.archived || !u.primaryEmail) continue;
+      users.push({
+        id: u.id,
+        email: u.primaryEmail,
+        firstName: u.name?.givenName || '',
+        fullName: u.name?.fullName || ''
+      });
+      if (u.id) userIdCache.set(u.primaryEmail, u.id);
+    }
+    pageToken = res.data?.nextPageToken;
+  } while (pageToken);
+
+  return users;
 }
 
 // Ops/error notifications: post into FALLBACK_SPACE_ID (falls back to
@@ -127,4 +180,4 @@ async function postOps(text) {
   }
 }
 
-module.exports = { postToSpace, sendDm, findDmSpace, postOps, resolveUserId };
+module.exports = { postToSpace, sendDm, findDmSpace, postOps, getUserInfo, listDomainUsers };
