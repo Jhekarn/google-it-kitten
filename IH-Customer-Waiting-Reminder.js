@@ -5,13 +5,13 @@
 //
 // NOTE: a Chat app can only DM users who already have a DM with it. If a
 // reporter never talked to the Kitten, the DM fails → a fallback notice is
-// posted into the internal support space (REPORT_SPACE_ID).
+// posted into the ops space (FALLBACK_SPACE_ID, else REPORT_SPACE_ID).
 //
 // Env: MARCUS_EMAIL (default marcus.gallein@urbansportsclub.com),
-//      SEND_COPY_TO_MARCUS=1|0 (default 1), REPORT_SPACE_ID (fallback space)
+//      SEND_COPY_TO_MARCUS=1|0 (default 1), FALLBACK_SPACE_ID / REPORT_SPACE_ID
 
 const axios = require('axios');
-const { sendDm, postToSpace } = require('./Chat-Poster');
+const { sendDm, postOps } = require('./Chat-Poster');
 
 const MARCUS_EMAIL = process.env.MARCUS_EMAIL || 'marcus.gallein@urbansportsclub.com';
 const SEND_COPY_TO_MARCUS = process.env.SEND_COPY_TO_MARCUS !== '0';
@@ -79,9 +79,8 @@ async function remindReporter(email, ticket) {
     if (SEND_COPY_TO_MARCUS && email !== MARCUS_EMAIL) {
       await sendDm(MARCUS_EMAIL, `📎 *Copy of reminder for ticket ${ticket.key}:*\n${text}`);
     }
-  } else if (process.env.REPORT_SPACE_ID) {
-    await postToSpace(
-      process.env.REPORT_SPACE_ID,
+  } else {
+    await postOps(
       `⚠️ Could not DM ${email} for *${ticket.key}* (no DM with IT Kitten yet). Please follow up manually: <${ticketUrl}|${ticket.key}>`
     );
   }
