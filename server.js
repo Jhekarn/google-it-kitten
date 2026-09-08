@@ -38,7 +38,7 @@ const { createJiraTicket } = require('./Jira');
 const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
 const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
-const { postOps } = require('./Chat-Poster');
+const { postOps, postToSpace: postToSpaceViaPoster } = require('./Chat-Poster');
 
 // ---- Scheduled jobs (like the Slack server.js) ----
 // Every Monday 08:00 UTC (= 09:00/10:00 Berlin): weekly satisfaction report
@@ -96,7 +96,25 @@ app.get('/jobs/:job', async (req, res) => {
       await runDailyReminder();
       return res.send('✅ Daily reminder executed.');
     }
-    return res.status(404).send('Unknown job. Use /jobs/weekly or /jobs/reminder.');
+    // Broadcast: introduce the Kitten (port of broadcast.js). Posts to
+    // REPORT_SPACE_ID by default; override with &space=spaces/XXXX.
+    if (req.params.job === 'broadcast') {
+      const target = req.query.space || process.env.REPORT_SPACE_ID;
+      if (!target) return res.status(400).send('No target space (set REPORT_SPACE_ID or pass &space=).');
+      const text =
+        `*Good Morning people of USC.* 🐱 As most of you might not be aware I exist, ` +
+        `here is a quick intro of what I can help you with in Google Chat:\n\n` +
+        `🎫 *Create a Jira ticket* – click the *Create a Jira Ticket* button to report an issue.\n` +
+        `📚 *FAQ & HowTo guides* – search the IT knowledge base by keyword, directly in Chat.\n` +
+        `🔑 *Request account access* – use the *Request accounts* button to learn how to start.\n` +
+        `📶 *WiFi passwords* – I can remind you of those too.\n` +
+        `📋 *My open tickets* – see all your open Jira tickets in one place.\n\n` +
+        `*How to reach me:* send me a direct message with the word "kitten", ` +
+        `or mention me (@IT Kitten) / use /kitten in any space I have joined.`;
+      await postToSpaceViaPoster(target, text);
+      return res.send(`✅ Broadcast posted to ${target}.`);
+    }
+    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder or /jobs/broadcast.');
   } catch (err) {
     console.error(`🚨 Manual job ${req.params.job} failed:`, err.message);
     return res.status(500).send(`❌ Job failed: ${err.message}`);
