@@ -56,7 +56,6 @@ app.get('/', (_req, res) => {
 // ---- Slash command IDs (must match the Chat API console config) ----
 const COMMANDS = {
   KITTEN: 1,      // /kitten     → help menu
-  SUBMIT_FAQ: 2   // /submit-faq → FAQ dialog
 };
 
 // ---- Normalize both event formats into one shape ----
@@ -169,8 +168,6 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
         switch (ev.commandId) {
           case COMMANDS.KITTEN:
             return res.json(w.newMessage(buildHelpMessage()));
-          case COMMANDS.SUBMIT_FAQ:
-            return res.json(w.openDialog(buildFaqDialogCardObject()));
           default:
             return res.json(w.newMessage({ text: `Unknown command id: ${ev.commandId}` }));
         }
