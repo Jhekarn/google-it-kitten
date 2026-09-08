@@ -61,4 +61,19 @@ async function sendDm(email, text) {
   }
 }
 
-module.exports = { postToSpace, sendDm, findDmSpace };
+// Ops/error notifications: post into FALLBACK_SPACE_ID (falls back to
+// REPORT_SPACE_ID if unset). Never throws — logging errors must not kill jobs.
+async function postOps(text) {
+  const spaceId = process.env.FALLBACK_SPACE_ID || process.env.REPORT_SPACE_ID;
+  if (!spaceId) {
+    console.warn('⚠️ postOps: no FALLBACK_SPACE_ID/REPORT_SPACE_ID set —', text);
+    return;
+  }
+  try {
+    await postToSpace(spaceId, text);
+  } catch (err) {
+    console.error('⚠️ postOps failed:', err.message, '—', text);
+  }
+}
+
+module.exports = { postToSpace, sendDm, findDmSpace, postOps };
