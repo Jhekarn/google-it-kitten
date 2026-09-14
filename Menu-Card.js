@@ -233,6 +233,7 @@ function buildJiraDialogCardObject() {
                 { text: 'IT Helpdesk - #it-support', value: 'IH', selected: true },
                 { text: 'SRE Team - #hive-platform-ask', value: 'SRE' },
                 { text: 'DevX Team - #hive-platform-ask', value: 'DX' }
+                { text: 'Security Team - #security-ask', value: 'SECHELP' }
               ]
             }
           },
