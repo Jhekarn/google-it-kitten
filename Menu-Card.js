@@ -12,7 +12,7 @@
 
 // In the add-on format, onClick.action.function must be the ENDPOINT URL of
 // this app — the logical action name travels in action.parameters.actionName.
-// We reuse CHAT_APP_AUDIENCE (the /chat URL) as that endpoint. 
+// We reuse CHAT_APP_AUDIENCE (the /chat URL) as that endpoint.
 const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 function buttonAction(actionName, opensDialog = false, extraParams = []) {
