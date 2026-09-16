@@ -202,7 +202,7 @@ app.get('/jobs/:job', async (req, res) => {
           ? `✅ Test announcement sent to ${req.query.email}${info?.firstName ? ` (as "${info.firstName}")` : ''}.`
           : `❌ Could not DM ${req.query.email} — no DM channel with the Kitten yet?`);
       }
-
+      
       // Safety: the full run must be confirmed explicitly
       if (req.query.confirm !== '1') {
         return res.status(400).send(
@@ -229,6 +229,59 @@ app.get('/jobs/:job', async (req, res) => {
       })().catch(err => postOps(`🚨 *announce-brain crashed:* ${err.message}`));
       return;
     }
+
+    // ⏰ Announce the new Reminders & Tasks feature to every user (DM, personalized).
+    // Single-user test:   /jobs/announce-tasks?key=…&email=someone@urbansportsclub.com
+    // Full run (everyone): /jobs/announce-tasks?key=…&confirm=1
+    if (req.params.job === 'announce-tasks') {
+      const messageFor = (firstName) =>
+        `Hey ${firstName || 'there'} 🐱 Oh, by the way... I completely *forgot* to mention — I have another new feature. ` +
+        `What a surprise: it's exactly for *not forgetting* things! 😹\n\n` +
+        `⏰ *Daily task reminder* — every morning I can send you a DM with your Google Tasks that are due today ` +
+        `(plus anything still open from earlier days). You pick the time — default is 08:00 Berlin time.\n` +
+        `📝 *Create tasks by chat* — just write me something like "create me a task for ordering a new cable" ` +
+        `and I'll put it straight into your Google Tasks, with an optional target date. ` +
+        `(Don't worry — I only create tasks, I never delete or complete them.)\n\n` +
+        `*How to switch it on:* type *kitten* → *⏰ Reminder settings* → enable ` +
+        `"Remind me of my tasks due today" and pick your time. ` +
+        `(If you don't have a 🧠 Kitten Brain yet, create that first — the settings live in there.) 🐾`;
+
+      // Test mode: one user only
+      if (req.query.email) {
+        const info = await getUserInfo(req.query.email);
+        const ok = await sendDm(req.query.email, messageFor(info?.firstName));
+        return res.send(ok
+          ? `✅ Test announcement sent to ${req.query.email}${info?.firstName ? ` (as "${info.firstName}")` : ''}.`
+          : `❌ Could not DM ${req.query.email} — no DM channel with the Kitten yet?`);
+      }
+
+      // Safety: the full run must be confirmed explicitly
+      if (req.query.confirm !== '1') {
+        return res.status(400).send(
+          'This would DM EVERY user in the domain. Add &confirm=1 to really run it, or &email=someone@… for a single test.');
+      }
+
+      const users = await listDomainUsers();
+      res.send(`🚀 Started: announcing Reminders & Tasks to ${users.length} users in the background. Summary goes to the ops space.`);
+
+      (async () => {
+        let sent = 0, noDm = 0, failed = 0;
+        for (const u of users) {
+          try {
+            (await sendDm(u.email, messageFor(u.firstName))) ? sent++ : noDm++;
+          } catch (err) {
+            console.warn(`⚠️ announce-tasks: ${u.email} failed: ${err.message}`);
+            failed++;
+          }
+          await new Promise(r => setTimeout(r, 250)); // stay well under Chat API quotas
+        }
+        const summary = `⏰ *Reminders & Tasks announcement finished:* ${sent} sent · ${noDm} without DM channel · ${failed} failed (of ${users.length} users).`;
+        console.log(summary);
+        await postOps(summary);
+      })().catch(err => postOps(`🚨 *announce-tasks crashed:* ${err.message}`));
+      return;
+    }
+    
 
     // ⏰ Task digest: DM opted-in users their Google Tasks due today.
     // Single-user test (ignores opt-in & time): /jobs/task-digest?key=…&email=…
