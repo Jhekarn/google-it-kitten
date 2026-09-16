@@ -40,6 +40,7 @@ const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
 const { postOps, postToSpace: postToSpaceViaPoster, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
 const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
+const { createBrain, rememberFact, getMemories } = require('./Kitten-Brain');
 
 // ---- Scheduled jobs (like the Slack server.js) ----
 // Every Monday 08:00 UTC (= 09:00/10:00 Berlin): weekly satisfaction report
@@ -297,11 +298,34 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           return res.json(w.newMessage(buildHelpMessage()));
         }
 
-        // 🤖 Free text → Gemini (grounded in the FAQ knowledge base).
+        // 🧠 "remember ..." → store in THIS user's private Kitten Brain
+        const remember = rawText.match(/^remember\b[:,]?\s*(.*)$/is);
+        if (remember) {
+          const fact = (remember[1] || '').replace(/^that\s+/i, '').trim();
+          if (!fact) {
+            return res.json(w.newMessage({ text: '🧠 What should I remember? Try: *remember I sit in the Berlin office*' }));
+          }
+          try {
+            const result = await rememberFact(ev.user?.email, fact);
+            if (result === 'no_brain') {
+              return res.json(w.newMessage({
+                text: '🧠 You don’t have a Kitten Brain yet! Type *kitten* and click *Create Kitten Brain* — then I can remember things just for you.'
+              }));
+            }
+            return res.json(w.newMessage({ text: `🧠 Got it — stored in your Kitten Brain: "${fact}"` }));
+          } catch (err) {
+            console.error('❌ remember failed:', err.message);
+            return res.json(w.newMessage({ text: '😿 I couldn’t reach your Kitten Brain right now. Please try again in a moment.' }));
+          }
+        }
+
+        // 🤖 Free text → Gemini (grounded in the FAQ knowledge base + the
+        // user's PRIVATE Kitten Brain memories — theirs only, never others').
         // Feature is env-gated: without VERTEX_PROJECT_ID the old hint is shown.
         if (geminiEnabled()) {
           try {
-            const answer = await askGemini(rawText, ev.user?.displayName);
+            const memories = await getMemories(ev.user?.email).catch(() => []);
+            const answer = await askGemini(rawText, ev.user?.displayName, memories);
             console.log(`🤖 Gemini answered (${rawText.slice(0, 60)}…) → ${answer.length} chars`);
             return res.json(w.newMessage({ text: answer }));
           } catch (err) {
@@ -346,6 +370,36 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
         switch (ev.fn) {
           case 'trigger_faq_modal':
             return res.json(w.openDialog(buildFaqDialogCardObject()));
+
+          // 🧠 Create the user's private Kitten Brain (folder + sheet + README
+          // in THEIR OWN Drive) and answer with links to it.
+          case 'create_brain': {
+            const email = ev.user?.email;
+            if (!email) {
+              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.')));
+            }
+            try {
+              const brain = await createBrain(email);
+              const linkButtons = [{
+                buttonList: {
+                  buttons: [
+                    { text: '📂 Open Kitten Brain folder', onClick: { openLink: { url: brain.folderUrl } } },
+                    { text: '📄 Open the memory sheet',    onClick: { openLink: { url: brain.sheetUrl } } }
+                  ]
+                }
+              }];
+              const header = brain.created
+                ? '🧠 ✅ Your Kitten Brain is ready! It lives in YOUR Google Drive and only you and I can see it. ' +
+                  'From now on, start any message with *remember* (e.g. "remember I use a MacBook Pro") and I’ll ' +
+                  'keep it in mind when we talk. Please don’t delete the folder — that’s where my memory of you lives. 🐾'
+                : '🧠 You already have a Kitten Brain! Here it is — and *remember ...* works any time.';
+              return res.json(w.updateMessage(buildHelpMessage(header, linkButtons)));
+            } catch (err) {
+              console.error('❌ Kitten Brain creation failed:', err.response?.data?.error?.message || err.message);
+              return res.json(w.updateMessage(buildHelpMessage(
+                '😿 I couldn’t create your Kitten Brain. Please tell Marcus Gallein (IT) — the Drive access for the Kitten may not be set up yet.')));
+            }
+          }
 
           // 🎫 Jira ticket dialog (ported from Slack's open_jira_modal)
           case 'open_jira_modal':
