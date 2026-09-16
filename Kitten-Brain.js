@@ -13,6 +13,8 @@
 //  - A central registry (BRAIN_REGISTRY tab in SPREADSHEET_ID) stores ONLY
 //    file IDs per email — never memory content — so the feature survives
 //    renames (access is by ID). Deleting the files breaks it, hence the README.
+//  - Per-user SETTINGS (reminders etc.) live in a separate SETTINGS tab of the
+//    user's own brain sheet, so they never interfere with the memories.
 //
 // Required setup (one-time, Admin Console → Security → API controls →
 // Domain-wide delegation → edit the existing client ID):
@@ -58,6 +60,12 @@ async function ensureRegistryTab() {
       spreadsheetId: process.env.SPREADSHEET_ID,
       requestBody: { requests: [{ addSheet: { properties: { title: REGISTRY_TAB } } }] }
     });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: `${REGISTRY_TAB}!A1:D1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [['Email', 'Folder ID', 'Sheet ID', 'Created']] }
+    });
     console.log('🧠 Created BRAIN_REGISTRY tab.');
   } catch (err) {
     if (!/already exists/i.test(err.message)) throw err;
@@ -69,13 +77,15 @@ async function loadRegistry(force = false) {
   const sheets = getSheetsClient();
   const map = new Map();
   try {
+    // Read from row 1 and filter for real email rows — this way the lookup
+    // works no matter whether a header row exists or an entry landed in row 1.
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: process.env.SPREADSHEET_ID,
-      range: `${REGISTRY_TAB}!A2:D`
+      range: `${REGISTRY_TAB}!A1:D`
     });
     for (const row of res.data.values || []) {
       const [email, folderId, sheetId] = row;
-      if (email && sheetId) map.set(email.toLowerCase(), { folderId, sheetId });
+      if (email && email.includes('@') && sheetId) map.set(email.toLowerCase(), { folderId, sheetId });
     }
   } catch (err) {
     if (/Unable to parse range/i.test(err.message)) {
@@ -112,7 +122,8 @@ const README_TEXT = [
   '',
   'This folder and the spreadsheet "IT Kitten Brain" belong to the IT Kitten',
   'chat assistant. The sheet stores the personal notes you asked the Kitten to',
-  'remember (chat message starting with "remember ...").',
+  'remember (chat message starting with "remember ..."). The SETTINGS tab',
+  'stores your reminder preferences.',
   '',
   'PRIVACY: These files live in YOUR Drive and belong to YOU. The Kitten can',
   'only access files it created itself — nothing else in your Drive. Your notes',
@@ -127,8 +138,22 @@ const README_TEXT = [
 ].join('\n');
 
 // Creates the brain for a user (or returns the existing one).
+// A per-user in-flight lock makes double/parallel clicks share ONE creation —
+// no duplicate folders, no matter how often the button is clicked.
 // Returns { created: boolean, folderId, sheetId, folderUrl, sheetUrl }
-async function createBrain(email) {
+const creating = new Map(); // email -> Promise
+
+function createBrain(email) {
+  const key = (email || '').toLowerCase();
+  if (creating.has(key)) return creating.get(key);
+  const p = createBrainInner(email).finally(() => creating.delete(key));
+  creating.set(key, p);
+  return p;
+}
+
+async function createBrainInner(email) {
+  // force-refresh the registry so a just-created brain is always found
+  await loadRegistry(true).catch(() => null);
   const existing = await getBrain(email);
   if (existing) {
     return {
@@ -238,4 +263,94 @@ async function getMemories(email) {
   }
 }
 
-module.exports = { createBrain, rememberFact, getMemories, getBrain };
+// ---- per-user SETTINGS (stored in a separate tab of the user's own brain
+// sheet, so they never interfere with the memories in the first tab) ----
+const SETTINGS_TAB = 'SETTINGS';
+const SETTING_DEFAULTS = {
+  reminders_enabled: true,  // master switch for proactive reminders
+  daily_tasks: false,       // 08:00 Berlin "tasks due today" DM (opt-in)
+  task_create: true         // "create me a task ..." via chat (opt-out)
+};
+const settingsCache = new Map(); // email -> { ts, values }
+
+async function ensureSettingsTab(email, sheetId) {
+  const { sheets } = getUserClients(email);
+  try {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: SETTINGS_TAB } } }] }
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `${SETTINGS_TAB}!A1:B1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [['Setting', 'Value']] }
+    });
+  } catch (err) {
+    if (!/already exists/i.test(err.message)) throw err;
+  }
+}
+
+// Returns the user's settings (defaults when no brain / tab / row exists).
+async function getSettings(email) {
+  const key = (email || '').toLowerCase();
+  const hit = settingsCache.get(key);
+  if (hit && Date.now() - hit.ts < MEMORY_CACHE_MS) return hit.values;
+
+  const values = { ...SETTING_DEFAULTS };
+  const brain = await getBrain(email);
+  if (brain) {
+    try {
+      const { sheets } = getUserClients(email);
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: brain.sheetId,
+        range: `${SETTINGS_TAB}!A2:B10`
+      });
+      for (const row of res.data.values || []) {
+        const [k, v] = row;
+        if (k && Object.prototype.hasOwnProperty.call(values, k)) {
+          values[k] = String(v).toUpperCase() === 'TRUE';
+        }
+      }
+    } catch (err) {
+      if (!/Unable to parse range/i.test(err.message)) {
+        console.warn(`⚠️ settings read failed for ${email}: ${err.message}`);
+      }
+      // tab doesn't exist yet → defaults
+    }
+  }
+  settingsCache.set(key, { ts: Date.now(), values });
+  return values;
+}
+
+// Saves the user's settings. Requires an existing brain ('no_brain' otherwise).
+async function setSettings(email, newValues) {
+  const brain = await getBrain(email);
+  if (!brain) return 'no_brain';
+  await ensureSettingsTab(email, brain.sheetId);
+  const { sheets } = getUserClients(email);
+  const values = { ...SETTING_DEFAULTS, ...newValues };
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: brain.sheetId,
+    range: `${SETTINGS_TAB}!A2:B4`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [
+        ['reminders_enabled', values.reminders_enabled ? 'TRUE' : 'FALSE'],
+        ['daily_tasks', values.daily_tasks ? 'TRUE' : 'FALSE'],
+        ['task_create', values.task_create ? 'TRUE' : 'FALSE']
+      ]
+    }
+  });
+  settingsCache.delete((email || '').toLowerCase());
+  console.log(`⚙️ Settings saved for ${email}:`, JSON.stringify(values));
+  return 'saved';
+}
+
+// All emails that have a Kitten Brain (used by the daily task digest).
+async function listBrainEmails() {
+  const reg = await loadRegistry();
+  return [...reg.keys()];
+}
+
+module.exports = { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, listBrainEmails };
