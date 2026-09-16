@@ -72,7 +72,9 @@ function menuButtons(hasBrain = false) {
     { text: '📄 Submit a New FAQ',             functionName: 'trigger_faq_modal', opensDialog: true }, // option_4
     { text: '📶 What is the wifi password?',   functionName: 'option_5' },
     { text: '📋 My Open Jira Tickets',         functionName: 'option_6' },
-    { text: hasBrain ? '🧠 Gogo Kitten Brain' : '🧠 Create Kitten Brain', functionName: 'create_brain' } // per-user private memory
+    { text: hasBrain ? '🧠 Gogo Kitten Brain' : '🧠 Create Kitten Brain', functionName: 'create_brain' }, // per-user private memory
+    { text: '⏰ Reminder settings',            functionName: 'open_reminder_settings', opensDialog: true },
+    { text: '❓ What can I do?',               functionName: 'show_functions', opensDialog: true }
   ];
 }
 
@@ -345,6 +347,166 @@ function buildFaqDialogCardObject() {
   };
 }
 
+// ---------- ⏰ Reminder settings dialog ----------
+// Toggles are stored in the SETTINGS tab of the user's own Kitten Brain sheet.
+function buildReminderSettingsCardObject(settings) {
+  return {
+    sections: [
+      {
+        header: '⏰ Reminder settings',
+        widgets: [
+          {
+            textParagraph: {
+              text: 'Stored in the <b>SETTINGS</b> tab of your own Kitten Brain sheet — your memories are untouched.'
+            }
+          },
+          {
+            selectionInput: {
+              name: 'reminder_opts',
+              type: 'SWITCH',
+              label: 'What may the Kitten do for you?',
+              items: [
+                { text: '🔔 Send me reminders (master switch)', value: 'reminders_enabled', selected: !!settings.reminders_enabled },
+                { text: '⏰ Remind me of my tasks due today (DM at 08:00 Berlin)', value: 'daily_tasks', selected: !!settings.daily_tasks },
+                { text: '📝 Allow "create me a task ..." via chat', value: 'task_create', selected: !!settings.task_create }
+              ]
+            }
+          },
+          {
+            buttonList: {
+              buttons: [{ text: 'Save', onClick: buttonAction('reminder_settings_submit') }]
+            }
+          }
+        ]
+      }
+    ]
+  };
+}
+
+// ---------- ❓ "What can I do?" overview dialog ----------
+function buildFunctionsCardObject(settings, hasBrain) {
+  const on = v => (v ? '✅ ON' : '❌ OFF');
+  return {
+    sections: [
+      {
+        header: '🐱 What IT Kitten can do',
+        widgets: [
+          {
+            textParagraph: {
+              text:
+                '📚 <b>FAQ search</b> — type in the menu\'s search field (live suggestions)\n' +
+                '🎫 <b>Create a Jira ticket</b> — menu button (IT, SRE, DevX, Security)\n' +
+                '📋 <b>My open Jira tickets</b> — menu button (paginated list)\n' +
+                '📄 <b>Submit a new FAQ</b> — menu button\n' +
+                '📶 <b>WiFi, HowTos, account access</b> — menu buttons\n' +
+                '🤖 <b>Ask anything</b> — just type a free-text question (AI, any language)\n' +
+                '📝 <b>Create a Google Task</b> — write "create me a task for ..."'
+            }
+          }
+        ]
+      },
+      {
+        header: '🧠 Kitten Brain (your private memory)',
+        widgets: [
+          {
+            textParagraph: {
+              text:
+                `Status: ${hasBrain ? '✅ created' : '❌ not created yet — menu → Create Kitten Brain'}\n` +
+                '• <b>remember ...</b> — I store it, visible only to you\n' +
+                '• <b>forget ...</b> — I show you where to delete it'
+            }
+          }
+        ]
+      },
+      {
+        header: '⏰ Reminders & tasks — your current setup',
+        widgets: [
+          {
+            textParagraph: {
+              text:
+                `🔔 Reminders (master switch): ${on(settings.reminders_enabled)}\n` +
+                `⏰ Daily "tasks due today" DM (08:00 Berlin): ${on(settings.daily_tasks)}\n` +
+                `📝 "create me a task ..." via chat: ${on(settings.task_create)}\n\n` +
+                `Change these: menu → ⏰ Reminder settings${hasBrain ? '' : ' (needs a Kitten Brain first)'}`
+            }
+          }
+        ]
+      }
+    ]
+  };
+}
+
+// ---------- 📝 Google Task creation ----------
+// Dialog: editable task text (prefilled from the chat message) + optional date.
+function buildTaskDialogCardObject(prefill = '') {
+  return {
+    sections: [
+      {
+        header: '📝 New Google Task',
+        widgets: [
+          {
+            textInput: {
+              label: 'Task',
+              type: 'SINGLE_LINE',
+              name: 'task_title',
+              value: prefill
+            }
+          },
+          {
+            dateTimePicker: {
+              label: 'Target date (optional)',
+              name: 'task_due',
+              type: 'DATE_ONLY'
+            }
+          },
+          { textParagraph: { text: 'No date picked = the task is created without a due date.' } },
+          {
+            buttonList: {
+              buttons: [{ text: 'Create', onClick: buttonAction('task_dialog_submit') }]
+            }
+          }
+        ]
+      }
+    ]
+  };
+}
+
+// Chat reply that offers to open the task dialog (dialogs can only be opened
+// from a button click — Chat platform rule — so this button is the bridge).
+function buildTaskOfferMessage(taskText) {
+  const short = (taskText || '').slice(0, 180);
+  return {
+    text: '📝 New task',
+    cardsV2: [
+      {
+        cardId: 'task_offer',
+        card: {
+          sections: [
+            {
+              widgets: [
+                {
+                  textParagraph: {
+                    text:
+                      `📝 I can create this Google Task for you:\n<b>${short || '(you\'ll type it in the next step)'}</b>\n\n` +
+                      'Click below to review it, optionally pick a target date, and create it — it lands in YOUR Google Tasks.'
+                  }
+                },
+                {
+                  buttonList: {
+                    buttons: [
+                      { text: '📝 Create this task…', onClick: buttonAction('open_task_modal', true, [{ key: 'prefill', value: short }]) }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  };
+}
+
 // ---------- Response wrappers: NEW add-on format ----------
 
 const addon = {
@@ -395,6 +557,10 @@ module.exports = {
   buildFaqDialogCardObject,
   buildJiraDialogCardObject,
   buildTicketCreatedMessage,
+  buildReminderSettingsCardObject,
+  buildFunctionsCardObject,
+  buildTaskDialogCardObject,
+  buildTaskOfferMessage,
   answerTextFor,
   extractUrls,
   isLinkOnlyAnswer,
