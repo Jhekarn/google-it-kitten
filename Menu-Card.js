@@ -62,14 +62,15 @@ function buildAnswerMessage(text) {
   return buildHelpMessage(text, widgets);
 }
 
-// The six menu buttons — same order & ids as in Slack's Menu-Buttons.js
+// The menu buttons — same order & ids as in Slack's Menu-Buttons.js
 const menuButtons = [
   { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal', opensDialog: true }, // option_1
   { text: '❓ HowTo section',                functionName: 'option_2' },
   { text: '⚒️ Request accounts',             functionName: 'option_3' },
   { text: '📄 Submit a New FAQ',             functionName: 'trigger_faq_modal', opensDialog: true }, // option_4
   { text: '📶 What is the wifi password?',   functionName: 'option_5' },
-  { text: '📋 My Open Jira Tickets',         functionName: 'option_6' }
+  { text: '📋 My Open Jira Tickets',         functionName: 'option_6' },
+  { text: '🧠 Create Kitten Brain',          functionName: 'create_brain' } // per-user private memory
 ];
 
 // The inner card (Cards v2 "card" object).
