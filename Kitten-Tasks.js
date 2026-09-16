@@ -98,10 +98,10 @@ async function runDailyTaskDigest(onlyEmail, hour = null) {
       if (!dueToday.length && !overdue.length) { empty++; continue; }
 
       let text = `⏰ *Good morning! Here are your tasks for today:*\n`;
-      for (const t of dueToday) text += `\n☐ ${t.title}${t.list && t.list !== 'My Tasks' ? `  _(${t.list})_` : ''}`;
+      for (const t of dueToday) text += `\n🔹 ${t.title}${t.list && t.list !== 'My Tasks' ? `  _(${t.list})_` : ''}`;
       if (overdue.length) {
         text += `\n\n⚠️ *Still open from earlier days:*`;
-        for (const t of overdue) text += `\n☐ ${t.title}${t.list && t.list !== 'My Tasks' ? `  _(${t.list})_` : ''}`;
+        for (const t of overdue) text += `\n🔸 ${t.title}${t.list && t.list !== 'My Tasks' ? `  _(${t.list})_` : ''}`;
       }
       text += `\n\n_You can turn this off any time: type *kitten* → ⏰ Reminder settings._ 🐾`;
 
