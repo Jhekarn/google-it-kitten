@@ -528,17 +528,28 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'reminder_settings_submit': {
             const picked = ev.formInputs?.reminder_opts?.stringInputs?.value || [];
             const hourRaw = parseInt(ev.formInputs?.digest_hour?.stringInputs?.value?.[0], 10);
+            const newHour = (!Number.isNaN(hourRaw) && hourRaw >= 0 && hourRaw <= 23) ? hourRaw : 8;
+            // settings BEFORE saving — to detect the FIRST time the daily
+            // task reminder is switched on (then we mention the reminder time)
+            const before = await getSettings(ev.user?.email).catch(() => null);
             const result = await setSettings(ev.user?.email, {
               reminders_enabled: picked.includes('reminders_enabled'),
               daily_tasks: picked.includes('daily_tasks'),
               task_create: picked.includes('task_create'),
-              digest_hour: (!Number.isNaN(hourRaw) && hourRaw >= 0 && hourRaw <= 23) ? hourRaw : 8
+              digest_hour: newHour
             }).catch(err => { console.error('❌ settings save failed:', err.message); return 'error'; });
             if (result === 'no_brain') {
               return res.json(w.closeDialog('⚠️ You need a Kitten Brain first — click 🧠 Create Kitten Brain in the menu.'));
             }
             if (result === 'error') {
               return res.json(w.closeDialog('😿 Could not save your settings. Please try again.'));
+            }
+            // First time the daily task reminder was enabled → tell the user
+            // the current reminder time and where to change it.
+            if (picked.includes('daily_tasks') && (!before || !before.daily_tasks)) {
+              return res.json(w.closeDialog(
+                `✅ Saved! ⏰ Your daily task reminder is currently set to ${String(newHour).padStart(2, '0')}:00 Berlin time — ` +
+                'you can change it any time: type *kitten* → ⏰ Reminder settings.'));
             }
             return res.json(w.closeDialog('✅ Reminder settings saved — stored in the SETTINGS tab of your Kitten Brain sheet.'));
           }
