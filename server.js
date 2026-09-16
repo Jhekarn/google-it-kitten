@@ -163,7 +163,55 @@ app.get('/jobs/:job', async (req, res) => {
       return;
     }
 
-    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder, /jobs/broadcast or /jobs/dm-all.');
+    // 🧠 Announce the Kitten Brain feature to every user (DM, personalized).
+    // Single-user test:   /jobs/announce-brain?key=…&email=someone@urbansportsclub.com
+    // Full run (everyone): /jobs/announce-brain?key=…&confirm=1
+    if (req.params.job === 'announce-brain') {
+      const messageFor = (firstName) =>
+        `Hey ${firstName || 'there'} 🧠 I learned a new trick — I can now *remember things, just for you*!\n\n` +
+        `Type *kitten* and click *🧠 Create Kitten Brain*. From then on, start any message with ` +
+        `*remember* (e.g. "remember I use a MacBook Pro") and I’ll keep it in mind whenever we chat. ` +
+        `To make me forget something, just open your memory sheet and delete the row.\n\n` +
+        `🔒 Your memories live in YOUR own Google Drive — nobody else can see them, ` +
+        `and they’re only ever used in your own conversations with me. 🐾`;
+
+      // Test mode: one user only
+      if (req.query.email) {
+        const info = await getUserInfo(req.query.email);
+        const ok = await sendDm(req.query.email, messageFor(info?.firstName));
+        return res.send(ok
+          ? `✅ Test announcement sent to ${req.query.email}${info?.firstName ? ` (as "${info.firstName}")` : ''}.`
+          : `❌ Could not DM ${req.query.email} — no DM channel with the Kitten yet?`);
+      }
+
+      // Safety: the full run must be confirmed explicitly
+      if (req.query.confirm !== '1') {
+        return res.status(400).send(
+          'This would DM EVERY user in the domain. Add &confirm=1 to really run it, or &email=someone@… for a single test.');
+      }
+
+      const users = await listDomainUsers();
+      res.send(`🚀 Started: announcing the Kitten Brain to ${users.length} users in the background. Summary goes to the ops space.`);
+
+      (async () => {
+        let sent = 0, noDm = 0, failed = 0;
+        for (const u of users) {
+          try {
+            (await sendDm(u.email, messageFor(u.firstName))) ? sent++ : noDm++;
+          } catch (err) {
+            console.warn(`⚠️ announce-brain: ${u.email} failed: ${err.message}`);
+            failed++;
+          }
+          await new Promise(r => setTimeout(r, 250)); // stay well under Chat API quotas
+        }
+        const summary = `🧠 *Kitten Brain announcement finished:* ${sent} sent · ${noDm} without DM channel · ${failed} failed (of ${users.length} users).`;
+        console.log(summary);
+        await postOps(summary);
+      })().catch(err => postOps(`🚨 *announce-brain crashed:* ${err.message}`));
+      return;
+    }
+
+    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder, /jobs/broadcast, /jobs/dm-all or /jobs/announce-brain.');
   } catch (err) {
     console.error(`🚨 Manual job ${req.params.job} failed:`, err.message);
     return res.status(500).send(`❌ Job failed: ${err.message}`);
@@ -319,6 +367,21 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             console.error('❌ remember failed:', err.message);
             return res.json(w.newMessage({ text: '😿 I couldn’t reach your Kitten Brain right now. Please try again in a moment.' }));
           }
+        }
+
+        // 🧠 "forget ..." → memories are deleted by the USER, in their own sheet
+        if (/^forget\b/i.test(rawText)) {
+          const brain = await getBrain(ev.user?.email).catch(() => null);
+          if (!brain) {
+            return res.json(w.newMessage({ text: '🧠 You don’t have a Kitten Brain yet, so there’s nothing to forget. Type *kitten* to create one.' }));
+          }
+          return res.json(w.newMessage({
+            text:
+              '🧠 Your memories belong to YOU, so I don’t delete them myself. ' +
+              'Open your memory sheet and simply delete the row(s) you want me to forget — ' +
+              'I’ll notice within a minute: ' +
+              `<https://docs.google.com/spreadsheets/d/${brain.sheetId}|Open my Kitten Brain sheet>`
+          }));
         }
 
         // 🤖 Free text → Gemini (grounded in the FAQ knowledge base + the
