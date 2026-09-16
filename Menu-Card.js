@@ -367,9 +367,20 @@ function buildReminderSettingsCardObject(settings) {
               label: 'What may the Kitten do for you?',
               items: [
                 { text: '🔔 Send me reminders (master switch)', value: 'reminders_enabled', selected: !!settings.reminders_enabled },
-                { text: '⏰ Remind me of my tasks due today (DM at 08:00 Berlin)', value: 'daily_tasks', selected: !!settings.daily_tasks },
+                { text: '⏰ Remind me of my tasks due today (daily DM)', value: 'daily_tasks', selected: !!settings.daily_tasks },
                 { text: '📝 Allow "create me a task ..." via chat', value: 'task_create', selected: !!settings.task_create }
               ]
+            }
+          },
+          {
+            selectionInput: {
+              name: 'digest_hour',
+              type: 'DROPDOWN',
+              label: '🕗 Daily task reminder time (Berlin time)',
+              items: Array.from({ length: 15 }, (_, i) => {
+                const h = i + 6; // 06:00 … 20:00
+                return { text: `${String(h).padStart(2, '0')}:00`, value: String(h), selected: Number(settings.digest_hour) === h };
+              })
             }
           },
           {
@@ -425,7 +436,7 @@ function buildFunctionsCardObject(settings, hasBrain) {
             textParagraph: {
               text:
                 `🔔 Reminders (master switch): ${on(settings.reminders_enabled)}\n` +
-                `⏰ Daily "tasks due today" DM (08:00 Berlin): ${on(settings.daily_tasks)}\n` +
+                `⏰ Daily "tasks due today" DM (${String(settings.digest_hour ?? 8).padStart(2, '0')}:00 Berlin): ${on(settings.daily_tasks)}\n` +
                 `📝 "create me a task ..." via chat: ${on(settings.task_create)}\n\n` +
                 `Change these: menu → ⏰ Reminder settings${hasBrain ? '' : ' (needs a Kitten Brain first)'}`
             }
