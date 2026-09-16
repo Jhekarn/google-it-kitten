@@ -5,10 +5,12 @@
 //      VERTEX_LOCATION (default europe-west1),
 //      GEMINI_MODEL (default gemini-2.5-flash),
 //      GOOGLE_CLIENT_EMAIL / GOOGLE_PRIVATE_KEY (service account, needs the
-//      "Agent Platform user" / roles/aiplatform.user role on the project)
+//      "Agent Platform user" / roles/aiplatform.user role on the project).
 //
 // The FAQ knowledge base (FAQ-DB.js, cached 60s) is injected as context into
 // every request, so answers point people to the right internal resources.
+// Optionally, the user's PRIVATE Kitten Brain memories are appended — only
+// ever for the user the current conversation belongs to.
 
 const axios = require('axios');
 const { google } = require('googleapis');
@@ -54,7 +56,18 @@ async function buildFaqContext() {
   }
 }
 
-function buildSystemInstruction(faqContext, userName) {
+// Wrapper: the UNCHANGED base instruction + (optionally) the user's private
+// Kitten Brain memories appended at the end.
+function buildSystemInstruction(faqContext, userName, memories) {
+  const memoryBlock = (memories && memories.length)
+    ? `\nPRIVATE MEMORY — personal notes THIS user asked you to remember. They are private ` +
+      `to this user; use them when relevant to personalize your answer. Never present them ` +
+      `as facts about anyone else:\n${memories.map(m => `- ${m}`).join('\n')}\n`
+    : '';
+  return buildSystemInstructionBase(faqContext, userName) + memoryBlock;
+}
+
+function buildSystemInstructionBase(faqContext, userName) {
   return (
     `You are IT Kitten 🐱, the internal IT assistant of Urban Sports Club (USC), living in Google Chat. ` +
     `You are talking to ${userName || 'a USC employee'}.\n\n` +
@@ -62,9 +75,12 @@ function buildSystemInstruction(faqContext, userName) {
     `- Be helpful, friendly and CONCISE (chat format, not essays).\n` +
     `- Answer in the language the user writes in.\n` +
     `- Use the internal IT knowledge base below whenever it is relevant, and include its links.\n` +
-    `- Never invent internal USC facts, links, passwords or policies that are not in the knowledge base. ` +
-    `For internal questions you cannot answer, say so and suggest creating a ticket: the user can type "kitten" ` +
-    `and click "Create a Jira Ticket" in the menu.\n` +
+    `- Never invent internal USC facts, links, passwords or policies that are not in the knowledge base.\n` +
+    `- TICKETS: If the user asks you to create a ticket, or asks how to report an IT issue, or has an internal ` +
+    `question you cannot answer, reply with: "Sure, I can do this — write *kitten* and use my menu to create a ` +
+    `ticket with selectable projects. If you need detailed help, please create a ticket for IT yourself here: ` +
+    `<https://urbansportsclub.atlassian.net/servicedesk/customer/portal/28/group/-1|IT Service Desk>" ` +
+    `(translate it to the user's language, keep the link).\n` +
     `- Never reveal passwords. If asked for WiFi passwords, point to the "What is the wifi password?" button in the kitten menu.\n` +
     `- General knowledge and technical questions outside USC you may answer normally.\n` +
     `- FORMATTING for Google Chat: *bold* with single asterisks, _italic_ with underscores, ` +
@@ -75,7 +91,7 @@ function buildSystemInstruction(faqContext, userName) {
 
 // Ask Gemini. Returns the answer text, or null when the feature is disabled.
 // Throws on API errors (caller decides the fallback message).
-async function askGemini(question, userName) {
+async function askGemini(question, userName, memories = []) {
   if (!isEnabled()) return null;
 
   const [token, faqContext] = await Promise.all([getAccessToken(), buildFaqContext()]);
@@ -85,7 +101,7 @@ async function askGemini(question, userName) {
     `/locations/${LOCATION}/publishers/google/models/${MODEL}:generateContent`;
 
   const body = {
-    systemInstruction: { parts: [{ text: buildSystemInstruction(faqContext, userName) }] },
+    systemInstruction: { parts: [{ text: buildSystemInstruction(faqContext, userName, memories) }] },
     contents: [{ role: 'user', parts: [{ text: question }] }],
     generationConfig: { temperature: 0.4, maxOutputTokens: 1024 }
   };
