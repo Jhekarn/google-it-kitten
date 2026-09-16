@@ -77,8 +77,10 @@ async function getTasksDueToday(email) {
 }
 
 // Daily digest: DM every opted-in brain owner their tasks for today.
+// Runs HOURLY — `hour` (Berlin) selects the users whose configured
+// digest_hour matches; onlyEmail = manual single-user test (ignores opt-in).
 // Returns a summary string (also used by the manual /jobs trigger).
-async function runDailyTaskDigest(onlyEmail) {
+async function runDailyTaskDigest(onlyEmail, hour = null) {
   const emails = onlyEmail ? [onlyEmail] : await listBrainEmails();
   let sent = 0, skipped = 0, empty = 0, failed = 0;
 
@@ -86,6 +88,7 @@ async function runDailyTaskDigest(onlyEmail) {
     try {
       const s = await getSettings(email);
       if (!onlyEmail && (!s.reminders_enabled || !s.daily_tasks)) { skipped++; continue; }
+      if (!onlyEmail && hour !== null && Number(s.digest_hour) !== Number(hour)) { skipped++; continue; }
 
       const { dueToday, overdue } = await getTasksDueToday(email);
       if (!dueToday.length && !overdue.length) { empty++; continue; }
@@ -106,9 +109,14 @@ async function runDailyTaskDigest(onlyEmail) {
     await new Promise(r => setTimeout(r, 250));
   }
 
-  const summary = `⏰ Task digest: ${sent} sent · ${skipped} not opted in · ${empty} nothing due · ${failed} failed (${emails.length} brains checked).`;
+  const summary = `⏰ Task digest${hour !== null ? ` (${String(hour).padStart(2, '0')}:00 Berlin)` : ''}: ${sent} sent · ${skipped} skipped (opt-in/time) · ${empty} nothing due · ${failed} failed (${emails.length} brains checked).`;
   console.log(summary);
   return summary;
 }
 
-module.exports = { createTask, getTasksDueToday, runDailyTaskDigest };
+// Current hour in Berlin (0-23) — used by the hourly cron.
+function berlinHour() {
+  return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', hour: 'numeric', hour12: false }).format(new Date()));
+}
+
+module.exports = { createTask, getTasksDueToday, runDailyTaskDigest, berlinHour };
