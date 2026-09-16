@@ -47,7 +47,7 @@ function extractUrls(text) {
 }
 
 // An answer message: text + "Open link" button(s) that open in a new tab
-function buildAnswerMessage(text) {
+function buildAnswerMessage(text, hasBrain = false) {
   const urls = extractUrls(text).slice(0, 3);
   const widgets = urls.length
     ? [{
@@ -59,24 +59,27 @@ function buildAnswerMessage(text) {
         }
       }]
     : [];
-  return buildHelpMessage(text, widgets);
+  return buildHelpMessage(text, widgets, hasBrain);
 }
 
-// The menu buttons — same order & ids as in Slack's Menu-Buttons.js
-const menuButtons = [
-  { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal', opensDialog: true }, // option_1
-  { text: '❓ HowTo section',                functionName: 'option_2' },
-  { text: '⚒️ Request accounts',             functionName: 'option_3' },
-  { text: '📄 Submit a New FAQ',             functionName: 'trigger_faq_modal', opensDialog: true }, // option_4
-  { text: '📶 What is the wifi password?',   functionName: 'option_5' },
-  { text: '📋 My Open Jira Tickets',         functionName: 'option_6' },
-  { text: '🧠 Create Kitten Brain',          functionName: 'create_brain' } // per-user private memory
-];
+// The menu buttons — same order & ids as in Slack's Menu-Buttons.js.
+// The Kitten Brain button label depends on whether THIS user already has one.
+function menuButtons(hasBrain = false) {
+  return [
+    { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal', opensDialog: true }, // option_1
+    { text: '❓ HowTo section',                functionName: 'option_2' },
+    { text: '⚒️ Request accounts',             functionName: 'option_3' },
+    { text: '📄 Submit a New FAQ',             functionName: 'trigger_faq_modal', opensDialog: true }, // option_4
+    { text: '📶 What is the wifi password?',   functionName: 'option_5' },
+    { text: '📋 My Open Jira Tickets',         functionName: 'option_6' },
+    { text: hasBrain ? '🧠 Gogo Kitten Brain' : '🧠 Create Kitten Brain', functionName: 'create_brain' } // per-user private memory
+  ];
+}
 
 // The inner card (Cards v2 "card" object).
 // extraWidgets are rendered between the header text and the FAQ search —
-// used for FAQ search results and answer link buttons.
-function buildHelpCardObject(headerText = 'Hi there! What do you need help with?', extraWidgets = []) {
+// used for FAQ search results.
+function buildHelpCardObject(headerText = 'Hi there! What do you need help with?', extraWidgets = [], hasBrain = false) {
   return {
     header: {
       title: 'IT Kitten 🐱',
@@ -111,7 +114,7 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
         widgets: [
           {
             buttonList: {
-              buttons: menuButtons.map(b => ({
+              buttons: menuButtons(hasBrain).map(b => ({
                 text: b.text,
                 onClick: buttonAction(b.functionName, b.opensDialog)
               }))
@@ -124,11 +127,11 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
 }
 
 // A complete Chat "message" object with the help card
-function buildHelpMessage(headerText, extraWidgets = []) {
+function buildHelpMessage(headerText, extraWidgets = [], hasBrain = false) {
   return {
     text: 'IT Kitten help menu',
     cardsV2: [
-      { cardId: 'kitten_help_menu', card: buildHelpCardObject(headerText, extraWidgets) }
+      { cardId: 'kitten_help_menu', card: buildHelpCardObject(headerText, extraWidgets, hasBrain) }
     ]
   };
 }
@@ -148,9 +151,9 @@ function isLinkOnlyAnswer(responseText) {
 // FAQ search results: matching FAQ titles as buttons.
 // Link-only answers open the page DIRECTLY (new tab); text answers show
 // the answer card (which itself carries an Open-link button when needed).
-function buildFaqResultsMessage(query, matches) {
+function buildFaqResultsMessage(query, matches, hasBrain = false) {
   if (!matches.length) {
-    return buildHelpMessage(`Hmm. I found nothing for "<b>${query}</b>". 💥 Try another keyword.`);
+    return buildHelpMessage(`Hmm. I found nothing for "<b>${query}</b>". 💥 Try another keyword.`, [], hasBrain);
   }
 
   const resultButtons = {
@@ -172,25 +175,26 @@ function buildFaqResultsMessage(query, matches) {
 
   return buildHelpMessage(
     `Results for "<b>${query}</b>" — click one:`,
-    [resultButtons]
+    [resultButtons],
+    hasBrain
   );
 }
 
 // Message after the user picked FAQ(s) from the autocomplete dropdown:
 // a single text answer is shown directly; link-only or multiple picks
 // become buttons (link-only ones open the page directly, new tab).
-function buildSelectionMessage(faqs) {
+function buildSelectionMessage(faqs, hasBrain = false) {
   if (!faqs.length) {
-    return buildHelpMessage('Hmm. I couldn’t find that FAQ anymore. 💥 Try the search again.');
+    return buildHelpMessage('Hmm. I couldn’t find that FAQ anymore. 💥 Try the search again.', [], hasBrain);
   }
   if (faqs.length === 1 && !isLinkOnlyAnswer(faqs[0].responseText)) {
     const txt = (faqs[0].responseText || '').trim();
     if (!txt) {
-      return buildHelpMessage(`ℹ️ "<b>${faqs[0].suggestion}</b>" has no help text stored in the FAQ DB yet. Please tell Marcus Gallein.`);
+      return buildHelpMessage(`ℹ️ "<b>${faqs[0].suggestion}</b>" has no help text stored in the FAQ DB yet. Please tell Marcus Gallein.`, [], hasBrain);
     }
-    return buildAnswerMessage(txt);
+    return buildAnswerMessage(txt, hasBrain);
   }
-  return buildFaqResultsMessage('your selection', faqs);
+  return buildFaqResultsMessage('your selection', faqs, hasBrain);
 }
 
 // Menu answers, ported from Slack's Menu-Buttons.js.
@@ -208,7 +212,7 @@ const menuAnswers = {
     `while the one for <b>Valencia</b> is <b>${process.env.WIFI_PW_VALENCIA || '(not configured)'}</b>.\n\n` +
     `<b>However,</b> if you have guests please let them sign in to the <b>guest network</b> using ` +
     `<b>${process.env.WIFI_PW_GUEST || '(not configured)'}</b> as the password.\n` +
-    `Please <b>do not</b> share the internal password with guests.`,
+    `Please <b>do not</b> share the internal password with guests.`
 };
 
 function answerTextFor(functionName) {
@@ -218,7 +222,7 @@ function answerTextFor(functionName) {
 }
 
 // The "New Jira Ticket" dialog card — ported from Slack's open_jira_modal.
-// Same projects: IT Helpdesk (IH), SRE (SRE), DevX (DX).
+// Projects: IT Helpdesk (IH), SRE (SRE), DevX (DX), Security (SECHELP).
 function buildJiraDialogCardObject() {
   return {
     sections: [
@@ -303,7 +307,8 @@ function buildTicketCreatedMessage(ticketKey, ticketUrl) {
   };
 }
 
-// The "Submit FAQ" dialog card (Chat's modal).
+// The "Submit FAQ" dialog card (Chat's modal). Submit only echoes for now —
+// the Google Sheet write is ported in step 2.
 function buildFaqDialogCardObject() {
   return {
     sections: [
