@@ -27,6 +27,10 @@ const {
   buildFaqDialogCardObject,
   buildJiraDialogCardObject,
   buildTicketCreatedMessage,
+  buildReminderSettingsCardObject,
+  buildFunctionsCardObject,
+  buildTaskDialogCardObject,
+  buildTaskOfferMessage,
   answerTextFor,
   extractUrls,
   isLinkOnlyAnswer,
@@ -40,7 +44,8 @@ const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
 const { postOps, postToSpace: postToSpaceViaPoster, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
 const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
-const { createBrain, rememberFact, getMemories, getBrain } = require('./Kitten-Brain');
+const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings } = require('./Kitten-Brain');
+const { createTask, runDailyTaskDigest } = require('./Kitten-Tasks');
 
 // ---- Scheduled jobs (like the Slack server.js) ----
 // Every Monday 08:00 UTC (= 09:00/10:00 Berlin): weekly satisfaction report
@@ -65,6 +70,19 @@ cron.schedule('0 5 * * *', async () => {
     await postOps(`🚨 *Daily IH reminder failed:* ${err.message}`);
   }
 });
+
+// Daily 08:00 Berlin time (DST-safe via timezone option): DM opted-in users
+// their Google Tasks due today. Only users who enabled it in ⏰ Reminder settings.
+cron.schedule('0 8 * * *', async () => {
+  console.log('⏰ Running daily task digest...');
+  try {
+    const summary = await runDailyTaskDigest();
+    await postOps(summary);
+  } catch (err) {
+    console.error('🚨 Task digest failed:', err.message);
+    await postOps(`🚨 *Daily task digest failed:* ${err.message}`);
+  }
+}, { timezone: 'Europe/Berlin' });
 
 const app = express();
 app.use(express.json());
@@ -211,7 +229,23 @@ app.get('/jobs/:job', async (req, res) => {
       return;
     }
 
-    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder, /jobs/broadcast, /jobs/dm-all or /jobs/announce-brain.');
+    // ⏰ Task digest: DM opted-in users their Google Tasks due today.
+    // Single-user test (ignores their opt-in): /jobs/task-digest?key=…&email=…
+    // Full run (opted-in users only):          /jobs/task-digest?key=…&confirm=1
+    if (req.params.job === 'task-digest') {
+      if (req.query.email) {
+        const summary = await runDailyTaskDigest(req.query.email);
+        return res.send(`✅ ${summary}`);
+      }
+      if (req.query.confirm !== '1') {
+        return res.status(400).send('Add &confirm=1 to run the digest for all opted-in users, or &email=… for a single test.');
+      }
+      const summary = await runDailyTaskDigest();
+      await postOps(summary);
+      return res.send(`✅ ${summary}`);
+    }
+
+    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder, /jobs/broadcast, /jobs/dm-all, /jobs/announce-brain or /jobs/task-digest.');
   } catch (err) {
     console.error(`🚨 Manual job ${req.params.job} failed:`, err.message);
     return res.status(500).send(`❌ Job failed: ${err.message}`);
@@ -348,6 +382,19 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           return res.json(w.newMessage(buildHelpMessage(undefined, [], hasBrain)));
         }
 
+        // 📝 "create me a task ..." → offer the task dialog (dialogs can only
+        // open from a button click, so the reply carries a prefilled button).
+        const taskMatch = rawText.match(/^create\s+(?:me\s+)?(?:a\s+)?task\b[:\s]*(?:for\s+)?(.*)$/i);
+        if (taskMatch) {
+          const settings = await getSettings(ev.user?.email).catch(() => null);
+          if (settings && !settings.task_create) {
+            return res.json(w.newMessage({
+              text: '📝 Task creation is switched OFF in your settings. Type *kitten* → ⏰ Reminder settings to turn it back on.'
+            }));
+          }
+          return res.json(w.newMessage(buildTaskOfferMessage((taskMatch[1] || '').trim())));
+        }
+
         // 🧠 "remember ..." → store in THIS user's private Kitten Brain
         const remember = rawText.match(/^remember\b[:,]?\s*(.*)$/is);
         if (remember) {
@@ -462,6 +509,58 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               console.error('❌ Kitten Brain creation failed:', err.response?.data?.error?.message || err.message);
               return res.json(w.updateMessage(buildHelpMessage(
                 '😿 I couldn’t create your Kitten Brain. Please tell Marcus Gallein (IT) — the Drive access for the Kitten may not be set up yet.', [], hasBrain)));
+            }
+          }
+
+          // ⏰ Reminder settings dialog (stored in the user's Kitten Brain)
+          case 'open_reminder_settings': {
+            if (!hasBrain) {
+              return res.json(w.updateMessage(buildHelpMessage(
+                '⏰ Reminder settings live in your Kitten Brain — please click *🧠 Create Kitten Brain* first, then open the settings again.', [], hasBrain)));
+            }
+            const settings = await getSettings(ev.user?.email);
+            return res.json(w.openDialog(buildReminderSettingsCardObject(settings)));
+          }
+
+          case 'reminder_settings_submit': {
+            const picked = ev.formInputs?.reminder_opts?.stringInputs?.value || [];
+            const result = await setSettings(ev.user?.email, {
+              reminders_enabled: picked.includes('reminders_enabled'),
+              daily_tasks: picked.includes('daily_tasks'),
+              task_create: picked.includes('task_create')
+            }).catch(err => { console.error('❌ settings save failed:', err.message); return 'error'; });
+            if (result === 'no_brain') {
+              return res.json(w.closeDialog('⚠️ You need a Kitten Brain first — click 🧠 Create Kitten Brain in the menu.'));
+            }
+            if (result === 'error') {
+              return res.json(w.closeDialog('😿 Could not save your settings. Please try again.'));
+            }
+            return res.json(w.closeDialog('✅ Reminder settings saved — stored in the SETTINGS tab of your Kitten Brain sheet.'));
+          }
+
+          // ❓ Overview of everything the Kitten can do + this user's setup
+          case 'show_functions': {
+            const settings = await getSettings(ev.user?.email).catch(() => ({ reminders_enabled: true, daily_tasks: false, task_create: true }));
+            return res.json(w.openDialog(buildFunctionsCardObject(settings, hasBrain)));
+          }
+
+          // 📝 Task dialog (prefilled from the chat message) + creation
+          case 'open_task_modal':
+            return res.json(w.openDialog(buildTaskDialogCardObject(ev.params?.prefill || '')));
+
+          case 'task_dialog_submit': {
+            const title = (ev.formInputs?.task_title?.stringInputs?.value?.[0] || '').trim();
+            if (!title) {
+              return res.json(w.closeDialog('⚠️ The task text was empty — nothing was created. Please try again.'));
+            }
+            const dueMs = ev.formInputs?.task_due?.dateInput?.msSinceEpoch;
+            try {
+              await createTask(ev.user?.email, title, dueMs);
+              const dueTxt = dueMs ? ` (due ${new Date(Number(dueMs)).toISOString().slice(0, 10)})` : '';
+              return res.json(w.newMessage({ text: `✅ Task created in your Google Tasks: "${title}"${dueTxt} 📝` }));
+            } catch (err) {
+              console.error('❌ Task creation failed:', err.response?.data?.error?.message || err.message);
+              return res.json(w.closeDialog('😿 I couldn’t create the task. Please tell Marcus Gallein (IT) — the Tasks access may not be set up yet.'));
             }
           }
 
