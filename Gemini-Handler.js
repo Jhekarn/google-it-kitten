@@ -62,7 +62,10 @@ function buildSystemInstruction(faqContext, userName, memories) {
   const memoryBlock = (memories && memories.length)
     ? `\nPRIVATE MEMORY — personal notes THIS user asked you to remember. They are private ` +
       `to this user; use them when relevant to personalize your answer. Never present them ` +
-      `as facts about anyone else:\n${memories.map(m => `- ${m}`).join('\n')}\n`
+      `as facts about anyone else. If the user asks you to forget, delete or stop remembering ` +
+      `one of these memories, explain that you cannot delete memories yourself: they should open ` +
+      `the "IT Kitten Brain" sheet in the "Kitten Brain" folder of their own Google Drive and ` +
+      `delete that row — you will forget it within a minute:\n${memories.map(m => `- ${m}`).join('\n')}\n`
     : '';
   return buildSystemInstructionBase(faqContext, userName) + memoryBlock;
 }
