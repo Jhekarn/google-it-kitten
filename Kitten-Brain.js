@@ -268,8 +268,9 @@ async function getMemories(email) {
 const SETTINGS_TAB = 'SETTINGS';
 const SETTING_DEFAULTS = {
   reminders_enabled: true,  // master switch for proactive reminders
-  daily_tasks: false,       // 08:00 Berlin "tasks due today" DM (opt-in)
-  task_create: true         // "create me a task ..." via chat (opt-out)
+  daily_tasks: false,       // "tasks due today" DM (opt-in)
+  task_create: true,        // "create me a task ..." via chat (opt-out)
+  digest_hour: 8            // hour (Berlin time) for the daily task DM
 };
 const settingsCache = new Map(); // email -> { ts, values }
 
@@ -308,7 +309,11 @@ async function getSettings(email) {
       });
       for (const row of res.data.values || []) {
         const [k, v] = row;
-        if (k && Object.prototype.hasOwnProperty.call(values, k)) {
+        if (!k || !Object.prototype.hasOwnProperty.call(values, k)) continue;
+        if (k === 'digest_hour') {
+          const h = parseInt(v, 10);
+          if (!Number.isNaN(h) && h >= 0 && h <= 23) values.digest_hour = h;
+        } else {
           values[k] = String(v).toUpperCase() === 'TRUE';
         }
       }
@@ -332,13 +337,14 @@ async function setSettings(email, newValues) {
   const values = { ...SETTING_DEFAULTS, ...newValues };
   await sheets.spreadsheets.values.update({
     spreadsheetId: brain.sheetId,
-    range: `${SETTINGS_TAB}!A2:B4`,
+    range: `${SETTINGS_TAB}!A2:B5`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
       values: [
         ['reminders_enabled', values.reminders_enabled ? 'TRUE' : 'FALSE'],
         ['daily_tasks', values.daily_tasks ? 'TRUE' : 'FALSE'],
-        ['task_create', values.task_create ? 'TRUE' : 'FALSE']
+        ['task_create', values.task_create ? 'TRUE' : 'FALSE'],
+        ['digest_hour', String(values.digest_hour)]
       ]
     }
   });
