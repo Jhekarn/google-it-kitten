@@ -40,7 +40,7 @@ const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
 const { postOps, postToSpace: postToSpaceViaPoster, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
 const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
-const { createBrain, rememberFact, getMemories } = require('./Kitten-Brain');
+const { createBrain, rememberFact, getMemories, getBrain } = require('./Kitten-Brain');
 
 // ---- Scheduled jobs (like the Slack server.js) ----
 // Every Monday 08:00 UTC (= 09:00/10:00 Berlin): weekly satisfaction report
@@ -268,6 +268,8 @@ function normalizeEvent(body) {
 app.post('/chat', chatAuthMiddleware(), async (req, res) => {
   const ev = normalizeEvent(req.body || {});
   const w = wrappers(ev.isAddon);
+  // Does THIS user already have a Kitten Brain? (drives the menu button label)
+  const hasBrain = ev.user?.email ? !!(await getBrain(ev.user.email).catch(() => null)) : false;
   console.log(`🐾 event kind=${ev.kind}${ev.fn ? ` fn=${ev.fn}` : ''}${ev.commandId ? ` command=${ev.commandId}` : ''}`);
 
   try {
@@ -283,7 +285,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
       case 'command': {
         switch (ev.commandId) {
           case COMMANDS.KITTEN:
-            return res.json(w.newMessage(buildHelpMessage()));
+            return res.json(w.newMessage(buildHelpMessage(undefined, [], hasBrain)));
           default:
             return res.json(w.newMessage({ text: `Unknown command id: ${ev.commandId}` }));
         }
@@ -295,7 +297,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
         const rawText = (ev.message?.argumentText ?? ev.message?.text ?? '').trim();
         const text = rawText.toLowerCase();
         if (text === '' || text === 'kitty' || text === 'kitten' || text === 'help') {
-          return res.json(w.newMessage(buildHelpMessage()));
+          return res.json(w.newMessage(buildHelpMessage(undefined, [], hasBrain)));
         }
 
         // 🧠 "remember ..." → store in THIS user's private Kitten Brain
@@ -376,7 +378,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'create_brain': {
             const email = ev.user?.email;
             if (!email) {
-              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.')));
+              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.', [], hasBrain)));
             }
             try {
               const brain = await createBrain(email);
@@ -388,16 +390,15 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
                   ]
                 }
               }];
-              const header = brain.created
-                ? '🧠 ✅ Your Kitten Brain is ready! It lives in YOUR Google Drive and only you and I can see it. ' +
-                  'From now on, start any message with *remember* (e.g. "remember I use a MacBook Pro") and I’ll ' +
-                  'keep it in mind when we talk. Please don’t delete the folder — that’s where my memory of you lives. 🐾'
-                : '🧠 You already have a Kitten Brain! Here it is — and *remember ...* works any time.';
-              return res.json(w.updateMessage(buildHelpMessage(header, linkButtons)));
+              const header =
+                '🧠 ✅ Your Kitten Brain is up and running! It lives in YOUR Google Drive and only you and I ' +
+                'can see it. Start any message with *remember* (e.g. "remember I use a MacBook Pro") and I’ll ' +
+                'keep it in mind when we talk. Please don’t delete the folder — that’s where my memory of you lives. 🐾';
+              return res.json(w.updateMessage(buildHelpMessage(header, linkButtons, true)));
             } catch (err) {
               console.error('❌ Kitten Brain creation failed:', err.response?.data?.error?.message || err.message);
               return res.json(w.updateMessage(buildHelpMessage(
-                '😿 I couldn’t create your Kitten Brain. Please tell Marcus Gallein (IT) — the Drive access for the Kitten may not be set up yet.')));
+                '😿 I couldn’t create your Kitten Brain. Please tell Marcus Gallein (IT) — the Drive access for the Kitten may not be set up yet.', [], hasBrain)));
             }
           }
 
@@ -430,7 +431,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'option_6': {
             const email = ev.user?.email;
             if (!email) {
-              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.')));
+              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.', [], hasBrain)));
             }
             try {
               const requestedPage = Number(ev.params?.page || 0);
@@ -454,10 +455,10 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               }
               const extraWidgets = navButtons.length ? [{ buttonList: { buttons: navButtons } }] : [];
 
-              return res.json(w.updateMessage(buildHelpMessage(text, extraWidgets)));
+              return res.json(w.updateMessage(buildHelpMessage(text, extraWidgets, hasBrain)));
             } catch (err) {
               console.error('❌ Fetching tickets failed:', err.response?.data || err.message);
-              return res.json(w.updateMessage(buildHelpMessage('❌ Sorry, I couldn’t fetch your Jira tickets. Please try again later.')));
+              return res.json(w.updateMessage(buildHelpMessage('❌ Sorry, I couldn’t fetch your Jira tickets. Please try again later.', [], hasBrain)));
             }
           }
 
@@ -465,15 +466,15 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'faq_search': {
             const query = (ev.formInputs?.faq_query?.stringInputs?.value?.[0] || '').trim();
             if (query.length < 2) {
-              return res.json(w.updateMessage(buildHelpMessage('Please type at least 2 characters into the search field. 🔎')));
+              return res.json(w.updateMessage(buildHelpMessage('Please type at least 2 characters into the search field. 🔎', [], hasBrain)));
             }
             try {
               const matches = await searchFAQs(query);
               console.log(`🔎 FAQ search "${query}" → ${matches.length} match(es)`);
-              return res.json(w.updateMessage(buildFaqResultsMessage(query, matches)));
+              return res.json(w.updateMessage(buildFaqResultsMessage(query, matches, hasBrain)));
             } catch (err) {
               console.error('❌ FAQ search failed:', err.message);
-              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ search is unavailable right now. Please tell Marcus Gallein.')));
+              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ search is unavailable right now. Please tell Marcus Gallein.', [], hasBrain)));
             }
           }
 
@@ -488,18 +489,18 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               if (allSel) {
                 const query = allSel.slice('__all__:'.length);
                 const matches = await searchFAQs(query);
-                return res.json(w.updateMessage(buildFaqResultsMessage(query, matches)));
+                return res.json(w.updateMessage(buildFaqResultsMessage(query, matches, hasBrain)));
               }
 
               const faqs = (await Promise.all(values.map(v => findFAQ(v)))).filter(Boolean);
-              if (!faqs.length) return res.json(w.updateMessage(buildHelpMessage()));
+              if (!faqs.length) return res.json(w.updateMessage(buildHelpMessage(undefined, [], hasBrain)));
 
-              const response = w.updateMessage(buildSelectionMessage(faqs));
+              const response = w.updateMessage(buildSelectionMessage(faqs, hasBrain));
               if (process.env.ENABLE_DEBUG_EVENTS === '1') console.log('📤 RESPONSE:', JSON.stringify(response).slice(0, 500));
               return res.json(response);
             } catch (err) {
               console.error('❌ FAQ selection failed:', err.message);
-              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.')));
+              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.', [], hasBrain)));
             }
           }
 
@@ -508,10 +509,10 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             try {
               const faq = await findFAQ(ev.params?.faq_value);
               const responseText = faq?.responseText || 'Hmm. I’m not sure how to help with that yet. 💥';
-              return res.json(w.updateMessage(buildAnswerMessage(responseText)));
+              return res.json(w.updateMessage(buildAnswerMessage(responseText, hasBrain)));
             } catch (err) {
               console.error('❌ FAQ lookup failed:', err.message);
-              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.')));
+              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.', [], hasBrain)));
             }
           }
 
@@ -536,7 +537,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
 
           // All other menu buttons → update the message with (placeholder) answer + menu
           default:
-            return res.json(w.updateMessage(buildAnswerMessage(answerTextFor(ev.fn))));
+            return res.json(w.updateMessage(buildAnswerMessage(answerTextFor(ev.fn), hasBrain)));
         }
       }
 
