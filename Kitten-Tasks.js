@@ -51,11 +51,14 @@ async function getTasksDueToday(email) {
   const tasks = getUserTasksClient(email);
   const lists = (await tasks.tasklists.list({ maxResults: 25 })).data.items || [];
 
-  // "today" in Berlin time
-  const now = new Date();
-  const berlin = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Berlin' }));
-  const endOfToday = new Date(Date.UTC(berlin.getFullYear(), berlin.getMonth(), berlin.getDate(), 23, 59, 59));
-  const startOfToday = new Date(Date.UTC(berlin.getFullYear(), berlin.getMonth(), berlin.getDate(), 0, 0, 0));
+  // Google Tasks due dates have NO time — the API stores the calendar date
+  // (normally as midnight UTC), so we compare CALENDAR DATES, not timestamps.
+  // "today" = today's date in Berlin. dueMax is set to TOMORROW so today's
+  // tasks are always safely inside the API filter, whatever its edge
+  // (inclusive/exclusive) behavior is — the exact day sorting happens here.
+  const berlinToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin' }).format(new Date()); // YYYY-MM-DD
+  const [y, m, d] = berlinToday.split('-').map(Number);
+  const startOfTomorrow = new Date(Date.UTC(y, m - 1, d + 1));
 
   const dueToday = [];
   const overdue = [];
@@ -63,13 +66,14 @@ async function getTasksDueToday(email) {
     const res = await tasks.tasks.list({
       tasklist: list.id,
       showCompleted: false,
-      dueMax: endOfToday.toISOString(),
+      dueMax: startOfTomorrow.toISOString(),
       maxResults: 100
     });
     for (const t of res.data.items || []) {
       if (!t.title || !t.due) continue;
-      const due = new Date(t.due);
-      if (due < startOfToday) overdue.push({ title: t.title, list: list.title });
+      const dueDate = String(t.due).slice(0, 10); // the task's calendar date
+      if (dueDate > berlinToday) continue;        // tomorrow or later — not yet
+      if (dueDate < berlinToday) overdue.push({ title: t.title, list: list.title });
       else dueToday.push({ title: t.title, list: list.title });
     }
   }
