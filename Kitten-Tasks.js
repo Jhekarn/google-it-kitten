@@ -16,6 +16,7 @@
 const { google } = require('googleapis');
 const { listBrainEmails, getSettings } = require('./Kitten-Brain');
 const { sendDm } = require('./Chat-Poster');
+const { getTodaysEvents } = require('./Kitten-Brief');
 
 const userClients = new Map(); // email -> tasks client
 
@@ -80,8 +81,10 @@ async function getTasksDueToday(email) {
   return { dueToday, overdue };
 }
 
-// Daily digest: DM every opted-in brain owner their tasks for today.
-// Runs HOURLY — `hour` (Berlin) selects the users whose configured
+// Daily digest DM: tasks due today (daily_tasks) and/or the morning
+// day-brief with today's meetings (morning_brief) — combined in ONE message,
+// sent at each user's configured digest_hour (Berlin).
+// The cron ticks hourly — `hour` selects the users whose configured
 // digest_hour matches; onlyEmail = manual single-user test (ignores opt-in).
 // Returns a summary string (also used by the manual /jobs trigger).
 async function runDailyTaskDigest(onlyEmail, hour = null) {
@@ -91,29 +94,62 @@ async function runDailyTaskDigest(onlyEmail, hour = null) {
   for (const email of emails) {
     try {
       const s = await getSettings(email);
-      if (!onlyEmail && (!s.reminders_enabled || !s.daily_tasks)) { skipped++; continue; }
+      if (!onlyEmail && (!s.reminders_enabled || (!s.daily_tasks && !s.morning_brief))) { skipped++; continue; }
       if (!onlyEmail && hour !== null && Number(s.digest_hour) !== Number(hour)) { skipped++; continue; }
+      const wantTasks = onlyEmail ? true : !!s.daily_tasks;
+      const wantBrief = onlyEmail ? true : !!s.morning_brief;
 
-      const { dueToday, overdue } = await getTasksDueToday(email);
-      if (!dueToday.length && !overdue.length) { empty++; continue; }
-
-      let text = `⏰ *Good morning! Here are your tasks for today:*\n`;
-      for (const t of dueToday) text += `\n🔹 ${t.title}${t.list && t.list !== 'My Tasks' ? `  _(${t.list})_` : ''}`;
-      if (overdue.length) {
-        text += `\n\n⚠️ *Still open from earlier days:*`;
-        for (const t of overdue) text += `\n🔸 ${t.title}${t.list && t.list !== 'My Tasks' ? `  _(${t.list})_` : ''}`;
+      // calendar (morning brief) — graceful: a failed read just drops the section
+      let events = null;
+      if (wantBrief) {
+        try {
+          events = await getTodaysEvents(email);
+        } catch (err) {
+          console.warn(`⚠️ calendar read failed for ${email}: ${err.message}`);
+        }
       }
-      text += `\n\n_You can turn this off any time: type *kitten* → ⏰ Reminder settings._ 🐾`;
+
+      // tasks
+      let dueToday = [], overdue = [];
+      if (wantTasks) ({ dueToday, overdue } = await getTasksDueToday(email));
+
+      const hasTasks = dueToday.length || overdue.length;
+      // stay quiet when there is nothing to say: tasks-only users with no due
+      // tasks, and brief users whose calendar read failed with no tasks either
+      if (!hasTasks && (!wantBrief || events === null)) { empty++; continue; }
+
+      let text = wantBrief && events !== null
+        ? `🌅 *Good morning! Here's your day:*\n`
+        : `⏰ *Good morning! Here are your tasks for today:*\n`;
+
+      if (wantBrief && events !== null) {
+        text += `\n📅 *Meetings today:*`;
+        if (!events.length) text += `\n— none. Enjoy the focus time! 🎉`;
+        else for (const e of events) text += `\n${e.allDay ? '🗓️ All day' : '🕐 ' + e.time} — ${e.summary}`;
+      }
+
+      if (hasTasks) {
+        if (wantBrief && events !== null) text += `\n\n📝 *Tasks:*`;
+        for (const t of dueToday) text += `\n🔹 ${t.title}${t.list && t.list !== 'My Tasks' ? `  _(${t.list})_` : ''}`;
+        if (overdue.length) {
+          text += `\n\n⚠️ *Still open from earlier days:*`;
+          for (const t of overdue) text += `\n🔸 ${t.title}${t.list && t.list !== 'My Tasks' ? `  _(${t.list})_` : ''}`;
+        }
+      } else if (wantTasks && wantBrief && events !== null) {
+        text += `\n\n📝 *Tasks:* nothing due today ✅`;
+      }
+
+      text += `\n\n_You can change this any time: type *kitten* → ⏰ Reminder settings._ 🐾`;
 
       (await sendDm(email, text)) ? sent++ : failed++;
     } catch (err) {
-      console.warn(`⚠️ task digest failed for ${email}: ${err.message}`);
+      console.warn(`⚠️ daily digest failed for ${email}: ${err.message}`);
       failed++;
     }
     await new Promise(r => setTimeout(r, 250));
   }
 
-  const summary = `⏰ Task digest${hour !== null ? ` (${String(hour).padStart(2, '0')}:00 Berlin)` : ''}: ${sent} sent · ${skipped} skipped (opt-in/time) · ${empty} nothing due · ${failed} failed (${emails.length} brains checked).`;
+  const summary = `⏰ Daily digest${hour !== null ? ` (${String(hour).padStart(2, '0')}:00 Berlin)` : ''}: ${sent} sent · ${skipped} skipped (opt-in/time) · ${empty} nothing due · ${failed} failed (${emails.length} brains checked).`;
   console.log(summary);
   return summary;
 }
