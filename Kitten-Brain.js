@@ -415,4 +415,4 @@ async function isAdmin(email) {
   return admins.has((email || '').toLowerCase());
 }
 
-module.exports = { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, listBrainEmails, isAdmin, listAdmins };
+module.exports = { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, listBrainEmails, isAdmin, listAdmins, getUserClients };
