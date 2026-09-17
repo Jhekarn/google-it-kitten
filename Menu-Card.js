@@ -524,15 +524,18 @@ function buildFunctionsCardObject(settings, hasBrain, tab = 'standard') {
   // Side-nav layout (like Google's own settings dialogs): tab buttons
   // stacked vertically in a narrow LEFT column, content in the RIGHT column.
   // The current tab is disabled (= greyed out, "you are here").
-  const navWidgets = FUNCTION_TABS.map(t => ({
+  // All buttons live in ONE buttonList: in the narrow column each button
+  // wraps onto its own line, tightly stacked (separate widgets would get
+  // spread out over the whole column height).
+  const navWidgets = [{
     buttonList: {
-      buttons: [{
+      buttons: FUNCTION_TABS.map(t => ({
         text: t.id === tab ? `▸ ${t.label}` : t.label,
         disabled: t.id === tab,
         onClick: buttonAction('show_functions_tab', false, [{ key: 'tab', value: t.id }])
-      }]
+      }))
     }
-  }));
+  }];
   const content = functionsTabContent(tab, settings, hasBrain);
   return {
     sections: [
