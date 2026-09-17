@@ -13,8 +13,6 @@
 //  - A central registry (BRAIN_REGISTRY tab in SPREADSHEET_ID) stores ONLY
 //    file IDs per email — never memory content — so the feature survives
 //    renames (access is by ID). Deleting the files breaks it, hence the README.
-//  - Per-user SETTINGS (reminders etc.) live in a separate SETTINGS tab of the
-//    user's own brain sheet, so they never interfere with the memories.
 //
 // Required setup (one-time, Admin Console → Security → API controls →
 // Domain-wide delegation → edit the existing client ID):
@@ -122,8 +120,7 @@ const README_TEXT = [
   '',
   'This folder and the spreadsheet "IT Kitten Brain" belong to the IT Kitten',
   'chat assistant. The sheet stores the personal notes you asked the Kitten to',
-  'remember (chat message starting with "remember ..."). The SETTINGS tab',
-  'stores your reminder preferences.',
+  'remember (chat message starting with "remember ...").',
   '',
   'PRIVACY: These files live in YOUR Drive and belong to YOU. The Kitten can',
   'only access files it created itself — nothing else in your Drive. Your notes',
@@ -269,8 +266,9 @@ const SETTINGS_TAB = 'SETTINGS';
 const SETTING_DEFAULTS = {
   reminders_enabled: true,  // master switch for proactive reminders
   daily_tasks: false,       // "tasks due today" DM (opt-in)
+  morning_brief: false,     // morning day-brief: today's meetings (opt-in)
   task_create: true,        // "create me a task ..." via chat (opt-out)
-  digest_hour: 8            // hour (Berlin time) for the daily task DM
+  digest_hour: 8            // hour (Berlin time) for the daily DM
 };
 const settingsCache = new Map(); // email -> { ts, values }
 
@@ -337,12 +335,13 @@ async function setSettings(email, newValues) {
   const values = { ...SETTING_DEFAULTS, ...newValues };
   await sheets.spreadsheets.values.update({
     spreadsheetId: brain.sheetId,
-    range: `${SETTINGS_TAB}!A2:B5`,
+    range: `${SETTINGS_TAB}!A2:B6`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
       values: [
         ['reminders_enabled', values.reminders_enabled ? 'TRUE' : 'FALSE'],
         ['daily_tasks', values.daily_tasks ? 'TRUE' : 'FALSE'],
+        ['morning_brief', values.morning_brief ? 'TRUE' : 'FALSE'],
         ['task_create', values.task_create ? 'TRUE' : 'FALSE'],
         ['digest_hour', String(values.digest_hour)]
       ]
@@ -359,4 +358,61 @@ async function listBrainEmails() {
   return [...reg.keys()];
 }
 
-module.exports = { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, listBrainEmails };
+// ---- Kitten admins (tab "Admin access" in the CENTRAL spreadsheet) ----
+// One email per row in column A (row 1 is the header). Add/remove admins by
+// simply editing the sheet — the Kitten picks it up within 5 minutes.
+const ADMIN_TAB = 'Admin access';
+let adminCache = null;
+let adminLoadedAt = 0;
+
+async function ensureAdminTab() {
+  const sheets = getSheetsClient();
+  try {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      requestBody: { requests: [{ addSheet: { properties: { title: ADMIN_TAB } } }] }
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: `'${ADMIN_TAB}'!A1:B1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [['Admin email', 'Added']] }
+    });
+    console.log('🛠️ Created "Admin access" tab (empty — add admin emails in column A).');
+  } catch (err) {
+    if (!/already exists/i.test(err.message)) throw err;
+  }
+}
+
+async function listAdmins(force = false) {
+  if (adminCache && !force && Date.now() - adminLoadedAt < 5 * 60 * 1000) return adminCache;
+  const sheets = getSheetsClient();
+  const set = new Set();
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: `'${ADMIN_TAB}'!A1:A`
+    });
+    for (const row of res.data.values || []) {
+      const v = (row[0] || '').trim().toLowerCase();
+      if (v.includes('@')) set.add(v);
+    }
+  } catch (err) {
+    if (/Unable to parse range/i.test(err.message)) {
+      await ensureAdminTab(); // first use: create the (empty) tab
+    } else {
+      throw err;
+    }
+  }
+  adminCache = set;
+  adminLoadedAt = Date.now();
+  return set;
+}
+
+// Is this user a Kitten admin? (drives the 🛠️ Admin menu button)
+async function isAdmin(email) {
+  const admins = await listAdmins();
+  return admins.has((email || '').toLowerCase());
+}
+
+module.exports = { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, listBrainEmails, isAdmin, listAdmins };
