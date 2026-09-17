@@ -29,6 +29,7 @@ const {
   buildTicketCreatedMessage,
   buildReminderSettingsCardObject,
   buildFunctionsCardObject,
+  buildMyRemindersCardObject,
   buildAdminCardObject,
   buildTaskDialogCardObject,
   buildTaskOfferMessage,
@@ -47,7 +48,7 @@ const { postOps, postToSpace: postToSpaceViaPoster, sendDm, getUserInfo, listDom
 const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, isAdmin } = require('./Kitten-Brain');
 const { createTask, runDailyTaskDigest, berlinHour } = require('./Kitten-Tasks');
-const { parseReminder, addReminder, listOpenReminders, cancelReminder, checkDueReminders, fmtBerlin } = require('./Kitten-Reminders');
+const { parseReminder, addReminder, listOpenReminders, cancelReminder, cancelReminderByRow, checkDueReminders, fmtBerlin } = require('./Kitten-Reminders');
 
 // ---- Prepared announcement DMs (used by /jobs AND the 🛠️ Admin dialog) ----
 const ANNOUNCEMENTS = {
@@ -408,7 +409,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           }
           let text = '⏰ *Your open reminders:*\n';
           mine.forEach((r, i) => { text += `\n${i + 1}. ${fmtBerlin(r.dueMs)} — ${r.text}`; });
-          text += '\n\n_Cancel one with:_ *cancel reminder 2*';
+          text += `\n\n_To cancel one, write *cancel reminder* + its number from this list (e.g. *cancel reminder 1*) — or use the ⏱️ My reminders menu button._`;
           return res.json(w.newMessage({ text }));
         }
 
@@ -586,6 +587,25 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             }
             const settings = await getSettings(ev.user?.email);
             return res.json(w.openDialog(buildReminderSettingsCardObject(settings)));
+          }
+
+          // ⏱️ My reminders dialog: list all open one-off reminders with a
+          // Cancel button each (cancel re-renders the dialog with the rest).
+          case 'open_my_reminders': {
+            const mine = await listOpenReminders(ev.user?.email).catch(() => []);
+            return res.json(w.openDialog(buildMyRemindersCardObject(
+              mine.map(r => ({ row: r.row, when: fmtBerlin(r.dueMs), text: r.text })))));
+          }
+
+          case 'cancel_reminder_row': {
+            const row = Number(ev.params?.row);
+            if (row) {
+              await cancelReminderByRow(ev.user?.email, row)
+                .catch(err => console.error('❌ dialog cancel failed:', err.message));
+            }
+            const mine = await listOpenReminders(ev.user?.email).catch(() => []);
+            return res.json(w.updateDialog(buildMyRemindersCardObject(
+              mine.map(r => ({ row: r.row, when: fmtBerlin(r.dueMs), text: r.text })))));
           }
 
           case 'reminder_settings_submit': {
