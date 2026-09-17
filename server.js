@@ -29,6 +29,7 @@ const {
   buildTicketCreatedMessage,
   buildReminderSettingsCardObject,
   buildFunctionsCardObject,
+  buildAdminCardObject,
   buildTaskDialogCardObject,
   buildTaskOfferMessage,
   answerTextFor,
@@ -44,8 +45,63 @@ const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
 const { postOps, postToSpace: postToSpaceViaPoster, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
 const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
-const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings } = require('./Kitten-Brain');
+const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, isAdmin } = require('./Kitten-Brain');
 const { createTask, runDailyTaskDigest, berlinHour } = require('./Kitten-Tasks');
+const { parseReminder, addReminder, listOpenReminders, cancelReminder, checkDueReminders, fmtBerlin } = require('./Kitten-Reminders');
+
+// ---- Prepared announcement DMs (used by /jobs AND the 🛠️ Admin dialog) ----
+const ANNOUNCEMENTS = {
+  'dm-all': {
+    label: '🤫 "Psst" chat intro (dm-all)',
+    text: (firstName) =>
+      `Hey psst ${firstName || 'there'} 🐱 ...don't tell anyone, but you can also *chat with me* ` +
+      `to assist you — just send me any IT question right here. Maybe give it a try? 😉`
+  },
+  'announce-brain': {
+    label: '🧠 Kitten Brain announcement',
+    text: (firstName) =>
+      `Hey ${firstName || 'there'} 🧠 I learned a new trick — I can now *remember things, just for you*!\n\n` +
+      `Type *kitten* and click *🧠 Create Kitten Brain*. From then on, start any message with ` +
+      `*remember* (e.g. "remember I use a MacBook Pro") and I’ll keep it in mind whenever we chat. ` +
+      `To make me forget something, just open your memory sheet and delete the row.\n\n` +
+      `🔒 Your memories live in YOUR own Google Drive — nobody else can see them, ` +
+      `and they’re only ever used in your own conversations with me. 🐾`
+  },
+  'announce-tasks': {
+    label: '⏰ Reminders & Tasks announcement',
+    text: (firstName) =>
+      `Hey ${firstName || 'there'} 🐱 Oh, by the way... I completely *forgot* to mention — I have another new feature. ` +
+      `What a surprise: it's exactly for *not forgetting* things! 😹\n\n` +
+      `⏰ *Daily task reminder* — every morning I can send you a DM with your Google Tasks that are due today ` +
+      `(plus anything still open from earlier days). You pick the time — default is 08:00 Berlin time.\n` +
+      `📝 *Create tasks by chat* — just write me something like "create me a task for ordering a new cable" ` +
+      `and I'll put it straight into your Google Tasks, with an optional target date. ` +
+      `(Don't worry — I only create tasks, I never delete or complete them.)\n\n` +
+      `*How to switch it on:* type *kitten* → *⏰ Reminder settings* → enable ` +
+      `"Remind me of my tasks due today" and pick your time. ` +
+      `(If you don't have a 🧠 Kitten Brain yet, create that first — the settings live in there.) 🐾`
+  }
+};
+
+// DM every (active) user in the domain, throttled; summary goes to ops.
+// Used by the /jobs endpoints and the 🛠️ Admin dialog.
+async function dmEveryone(label, messageFor) {
+  const users = await listDomainUsers();
+  let sent = 0, noDm = 0, failed = 0;
+  for (const u of users) {
+    try {
+      (await sendDm(u.email, messageFor(u.firstName))) ? sent++ : noDm++;
+    } catch (err) {
+      console.warn(`⚠️ ${label}: ${u.email} failed: ${err.message}`);
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 250)); // stay well under Chat API quotas
+  }
+  const summary = `${label} *finished:* ${sent} sent · ${noDm} without DM channel · ${failed} failed (of ${users.length} users).`;
+  console.log(summary);
+  await postOps(summary);
+  return summary;
+}
 
 // ---- Scheduled jobs (like the Slack server.js) ----
 // Every Monday 08:00 UTC (= 09:00/10:00 Berlin): weekly satisfaction report
@@ -71,8 +127,8 @@ cron.schedule('0 5 * * *', async () => {
   }
 });
 
-// HOURLY (Berlin time, DST-safe): DM opted-in users their Google Tasks due
-// today — each user at THEIR configured hour (⏰ Reminder settings, default 08:00).
+// HOURLY (Berlin time, DST-safe): daily digest DM (tasks due today and/or the
+// morning day-brief) — each user at THEIR configured hour (default 08:00).
 cron.schedule('0 * * * *', async () => {
   const hour = berlinHour();
   try {
@@ -80,10 +136,26 @@ cron.schedule('0 * * * *', async () => {
     // only report to ops when something actually happened this hour
     if (!/ 0 sent /.test(summary)) await postOps(summary);
   } catch (err) {
-    console.error('🚨 Task digest failed:', err.message);
-    await postOps(`🚨 *Task digest (${hour}:00 Berlin) failed:* ${err.message}`);
+    console.error('🚨 Daily digest failed:', err.message);
+    await postOps(`🚨 *Daily digest (${hour}:00 Berlin) failed:* ${err.message}`);
   }
 }, { timezone: 'Europe/Berlin' });
+
+// EVERY MINUTE: deliver due one-off reminders ("remind me in 2 hours ...").
+// A single central sheet read per tick; quiet unless something was sent.
+let reminderFailStreak = 0;
+cron.schedule('* * * * *', async () => {
+  try {
+    await checkDueReminders();
+    reminderFailStreak = 0;
+  } catch (err) {
+    console.error('🚨 Reminder check failed:', err.message);
+    // don't spam ops every minute — report once when it starts failing
+    if (++reminderFailStreak === 3) {
+      await postOps(`🚨 *One-off reminder delivery is failing:* ${err.message}`).catch(() => null);
+    }
+  }
+});
 
 const app = express();
 app.use(express.json());
@@ -140,10 +212,10 @@ app.get('/jobs/:job', async (req, res) => {
     // Full run (everyone): /jobs/dm-all?key=…&confirm=1
     // The full run responds immediately and works in the background; the
     // summary (sent / no DM channel / failed) is posted to the ops space.
-    if (req.params.job === 'dm-all') {
-      const messageFor = (firstName) =>
-        `Hey psst ${firstName || 'there'} 🐱 ...don't tell anyone, but you can also *chat with me* ` +
-        `to assist you — just send me any IT question right here. Maybe give it a try? 😉`;
+    // dm-all / announce-brain / announce-tasks — all use the shared
+    // ANNOUNCEMENTS templates + dmEveryone (also reachable via 🛠️ Admin).
+    if (ANNOUNCEMENTS[req.params.job]) {
+      const { label, text: messageFor } = ANNOUNCEMENTS[req.params.job];
 
       // Test mode: one user only
       if (req.query.email) {
@@ -160,128 +232,11 @@ app.get('/jobs/:job', async (req, res) => {
           'This would DM EVERY user in the domain. Add &confirm=1 to really run it, or &email=someone@… for a single test.');
       }
 
-      const users = await listDomainUsers();
-      res.send(`🚀 Started: DMing ${users.length} users in the background. A summary will be posted to the ops space.`);
-
-      // Continue in the background — don't block the HTTP response.
-      (async () => {
-        let sent = 0, noDm = 0, failed = 0;
-        for (const u of users) {
-          try {
-            (await sendDm(u.email, messageFor(u.firstName))) ? sent++ : noDm++;
-          } catch (err) {
-            console.warn(`⚠️ dm-all: ${u.email} failed: ${err.message}`);
-            failed++;
-          }
-          await new Promise(r => setTimeout(r, 250)); // stay well under Chat API quotas
-        }
-        const summary = `🤫 *DM-all finished:* ${sent} sent · ${noDm} without DM channel · ${failed} failed (of ${users.length} users).`;
-        console.log(summary);
-        await postOps(summary);
-      })().catch(err => postOps(`🚨 *DM-all crashed:* ${err.message}`));
+      res.send(`🚀 Started: sending "${label}" to everyone in the background. Summary goes to the ops space.`);
+      dmEveryone(label, messageFor)
+        .catch(err => postOps(`🚨 *${req.params.job} crashed:* ${err.message}`));
       return;
     }
-
-    // 🧠 Announce the Kitten Brain feature to every user (DM, personalized).
-    // Single-user test:   /jobs/announce-brain?key=…&email=someone@urbansportsclub.com
-    // Full run (everyone): /jobs/announce-brain?key=…&confirm=1
-    if (req.params.job === 'announce-brain') {
-      const messageFor = (firstName) =>
-        `Hey ${firstName || 'there'} 🧠 I learned a new trick — I can now *remember things, just for you*!\n\n` +
-        `Type *kitten* and click *🧠 Create Kitten Brain*. From then on, start any message with ` +
-        `*remember* (e.g. "remember I use a MacBook Pro") and I’ll keep it in mind whenever we chat. ` +
-        `To make me forget something, just open your memory sheet and delete the row.\n\n` +
-        `🔒 Your memories live in YOUR own Google Drive — nobody else can see them, ` +
-        `and they’re only ever used in your own conversations with me. 🐾`;
-
-      // Test mode: one user only
-      if (req.query.email) {
-        const info = await getUserInfo(req.query.email);
-        const ok = await sendDm(req.query.email, messageFor(info?.firstName));
-        return res.send(ok
-          ? `✅ Test announcement sent to ${req.query.email}${info?.firstName ? ` (as "${info.firstName}")` : ''}.`
-          : `❌ Could not DM ${req.query.email} — no DM channel with the Kitten yet?`);
-      }
-      
-      // Safety: the full run must be confirmed explicitly
-      if (req.query.confirm !== '1') {
-        return res.status(400).send(
-          'This would DM EVERY user in the domain. Add &confirm=1 to really run it, or &email=someone@… for a single test.');
-      }
-
-      const users = await listDomainUsers();
-      res.send(`🚀 Started: announcing the Kitten Brain to ${users.length} users in the background. Summary goes to the ops space.`);
-
-      (async () => {
-        let sent = 0, noDm = 0, failed = 0;
-        for (const u of users) {
-          try {
-            (await sendDm(u.email, messageFor(u.firstName))) ? sent++ : noDm++;
-          } catch (err) {
-            console.warn(`⚠️ announce-brain: ${u.email} failed: ${err.message}`);
-            failed++;
-          }
-          await new Promise(r => setTimeout(r, 250)); // stay well under Chat API quotas
-        }
-        const summary = `🧠 *Kitten Brain announcement finished:* ${sent} sent · ${noDm} without DM channel · ${failed} failed (of ${users.length} users).`;
-        console.log(summary);
-        await postOps(summary);
-      })().catch(err => postOps(`🚨 *announce-brain crashed:* ${err.message}`));
-      return;
-    }
-
-    // ⏰ Announce the new Reminders & Tasks feature to every user (DM, personalized).
-    // Single-user test:   /jobs/announce-tasks?key=…&email=someone@urbansportsclub.com
-    // Full run (everyone): /jobs/announce-tasks?key=…&confirm=1
-    if (req.params.job === 'announce-tasks') {
-      const messageFor = (firstName) =>
-        `Hey ${firstName || 'there'} 🐱 Oh, by the way... I completely *forgot* to mention — I have another new feature. ` +
-        `What a surprise: it's exactly for *not forgetting* things! 😹\n\n` +
-        `⏰ *Daily task reminder* — every morning I can send you a DM with your Google Tasks that are due today ` +
-        `(plus anything still open from earlier days). You pick the time — default is 08:00 Berlin time.\n` +
-        `📝 *Create tasks by chat* — just write me something like "create me a task for ordering a new cable" ` +
-        `and I'll put it straight into your Google Tasks, with an optional target date. ` +
-        `(Don't worry — I only create tasks, I never delete or complete them.)\n\n` +
-        `*How to switch it on:* type *kitten* → *⏰ Reminder settings* → enable ` +
-        `"Remind me of my tasks due today" and pick your time. ` +
-        `(If you don't have a 🧠 Kitten Brain yet, create that first — the settings live in there.) 🐾`;
-
-      // Test mode: one user only
-      if (req.query.email) {
-        const info = await getUserInfo(req.query.email);
-        const ok = await sendDm(req.query.email, messageFor(info?.firstName));
-        return res.send(ok
-          ? `✅ Test announcement sent to ${req.query.email}${info?.firstName ? ` (as "${info.firstName}")` : ''}.`
-          : `❌ Could not DM ${req.query.email} — no DM channel with the Kitten yet?`);
-      }
-
-      // Safety: the full run must be confirmed explicitly
-      if (req.query.confirm !== '1') {
-        return res.status(400).send(
-          'This would DM EVERY user in the domain. Add &confirm=1 to really run it, or &email=someone@… for a single test.');
-      }
-
-      const users = await listDomainUsers();
-      res.send(`🚀 Started: announcing Reminders & Tasks to ${users.length} users in the background. Summary goes to the ops space.`);
-
-      (async () => {
-        let sent = 0, noDm = 0, failed = 0;
-        for (const u of users) {
-          try {
-            (await sendDm(u.email, messageFor(u.firstName))) ? sent++ : noDm++;
-          } catch (err) {
-            console.warn(`⚠️ announce-tasks: ${u.email} failed: ${err.message}`);
-            failed++;
-          }
-          await new Promise(r => setTimeout(r, 250)); // stay well under Chat API quotas
-        }
-        const summary = `⏰ *Reminders & Tasks announcement finished:* ${sent} sent · ${noDm} without DM channel · ${failed} failed (of ${users.length} users).`;
-        console.log(summary);
-        await postOps(summary);
-      })().catch(err => postOps(`🚨 *announce-tasks crashed:* ${err.message}`));
-      return;
-    }
-    
 
     // ⏰ Task digest: DM opted-in users their Google Tasks due today.
     // Single-user test (ignores opt-in & time): /jobs/task-digest?key=…&email=…
@@ -301,7 +256,7 @@ app.get('/jobs/:job', async (req, res) => {
       return res.send(`✅ ${summary}`);
     }
 
-    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder, /jobs/broadcast, /jobs/dm-all, /jobs/announce-brain or /jobs/task-digest.');
+    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder, /jobs/broadcast, /jobs/dm-all, /jobs/announce-brain, /jobs/announce-tasks or /jobs/task-digest.');
   } catch (err) {
     console.error(`🚨 Manual job ${req.params.job} failed:`, err.message);
     return res.status(500).send(`❌ Job failed: ${err.message}`);
@@ -407,7 +362,13 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
   const ev = normalizeEvent(req.body || {});
   const w = wrappers(ev.isAddon);
   // Does THIS user already have a Kitten Brain? (drives the menu button label)
-  const hasBrain = ev.user?.email ? !!(await getBrain(ev.user.email).catch(() => null)) : false;
+  // Is THIS user a Kitten admin? (shows the 🛠️ Admin button)
+  const [hasBrain, adminUser] = ev.user?.email
+    ? await Promise.all([
+        getBrain(ev.user.email).then(b => !!b).catch(() => false),
+        isAdmin(ev.user.email).catch(() => false)
+      ])
+    : [false, false];
   console.log(`🐾 event kind=${ev.kind}${ev.fn ? ` fn=${ev.fn}` : ''}${ev.commandId ? ` command=${ev.commandId}` : ''}`);
 
   try {
@@ -423,7 +384,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
       case 'command': {
         switch (ev.commandId) {
           case COMMANDS.KITTEN:
-            return res.json(w.newMessage(buildHelpMessage(undefined, [], hasBrain)));
+            return res.json(w.newMessage(buildHelpMessage(undefined, [], hasBrain, adminUser)));
           default:
             return res.json(w.newMessage({ text: `Unknown command id: ${ev.commandId}` }));
         }
@@ -435,7 +396,56 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
         const rawText = (ev.message?.argumentText ?? ev.message?.text ?? '').trim();
         const text = rawText.toLowerCase();
         if (text === '' || text === 'kitty' || text === 'kitten' || text === 'help') {
-          return res.json(w.newMessage(buildHelpMessage(undefined, [], hasBrain)));
+          return res.json(w.newMessage(buildHelpMessage(undefined, [], hasBrain, adminUser)));
+        }
+
+        // ⏱️ One-off reminders
+        // "my reminders" → list this user's open reminders
+        if (/^(?:show\s+|list\s+)?my\s+reminders\s*$/i.test(rawText)) {
+          const mine = await listOpenReminders(ev.user?.email).catch(() => []);
+          if (!mine.length) {
+            return res.json(w.newMessage({ text: '⏰ You have no open reminders. Try: *remind me in 2 hours to check the deploy*' }));
+          }
+          let text = '⏰ *Your open reminders:*\n';
+          mine.forEach((r, i) => { text += `\n${i + 1}. ${fmtBerlin(r.dueMs)} — ${r.text}`; });
+          text += '\n\n_Cancel one with:_ *cancel reminder 2*';
+          return res.json(w.newMessage({ text }));
+        }
+
+        // "cancel reminder N" → cancel the n-th open reminder
+        const cancelMatch = rawText.match(/^cancel\s+reminder\s+(\d+)\s*$/i);
+        if (cancelMatch) {
+          const cancelled = await cancelReminder(ev.user?.email, Number(cancelMatch[1])).catch(() => null);
+          return res.json(w.newMessage({
+            text: cancelled
+              ? `✅ Cancelled: "${cancelled.text}" (was due ${fmtBerlin(cancelled.dueMs)}). 🐾`
+              : `⚠️ I couldn't find reminder #${cancelMatch[1]} — type *my reminders* to see the current numbers.`
+          }));
+        }
+
+        // "remind me ..." → parse & store a one-off reminder
+        if (/^remind\s+me\b/i.test(rawText)) {
+          const parsed = parseReminder(rawText);
+          if (!parsed) {
+            return res.json(w.newMessage({
+              text:
+                '⏰ I didn\'t catch the time. Try one of these:\n' +
+                '• *remind me in 30 minutes to check the deploy*\n' +
+                '• *remind me at 15:30 to call BEM*\n' +
+                '• *remind me tomorrow at 9 to submit the report*\n' +
+                '• *remind me on friday to water the plants*\n' +
+                '• *remind me on 24.12. at 10 to buy presents*'
+            }));
+          }
+          const result = await addReminder(ev.user?.email, parsed.dueMs, parsed.text)
+            .catch(err => { console.error('❌ reminder store failed:', err.message); return 'error'; });
+          if (result === 'past') return res.json(w.newMessage({ text: '⏰ That time is already in the past — try a future one. 😉' }));
+          if (result === 'too_far') return res.json(w.newMessage({ text: '⏰ That\'s more than a year away — I can only remember reminders up to 1 year ahead.' }));
+          if (result === 'too_long') return res.json(w.newMessage({ text: '⏰ That reminder text is too long — please keep it under 300 characters.' }));
+          if (result === 'error') return res.json(w.newMessage({ text: '😿 I couldn\'t store the reminder right now. Please try again in a moment.' }));
+          return res.json(w.newMessage({
+            text: `⏰ Got it! I'll remind you on *${fmtBerlin(parsed.dueMs)}* (Berlin time): "${parsed.text}"\n_See them all with *my reminders*._ 🐾`
+          }));
         }
 
         // 📝 "create me a task ..." → offer the task dialog (dialogs can only
@@ -544,7 +554,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'create_brain': {
             const email = ev.user?.email;
             if (!email) {
-              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.', [], hasBrain)));
+              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.', [], hasBrain, adminUser)));
             }
             try {
               const brain = await createBrain(email);
@@ -560,11 +570,11 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
                 '🧠 ✅ Your Kitten Brain is up and running! It lives in YOUR Google Drive and only you and I ' +
                 'can see it. Start any message with *remember* (e.g. "remember I use a MacBook Pro") and I’ll ' +
                 'keep it in mind when we talk. Please don’t delete the folder — that’s where my memory of you lives. 🐾';
-              return res.json(w.updateMessage(buildHelpMessage(header, linkButtons, true)));
+              return res.json(w.updateMessage(buildHelpMessage(header, linkButtons, true, adminUser)));
             } catch (err) {
               console.error('❌ Kitten Brain creation failed:', err.response?.data?.error?.message || err.message);
               return res.json(w.updateMessage(buildHelpMessage(
-                '😿 I couldn’t create your Kitten Brain. Please tell Marcus Gallein (IT) — the Drive access for the Kitten may not be set up yet.', [], hasBrain)));
+                '😿 I couldn’t create your Kitten Brain. Please tell Marcus Gallein (IT) — the Drive access for the Kitten may not be set up yet.', [], hasBrain, adminUser)));
             }
           }
 
@@ -572,7 +582,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'open_reminder_settings': {
             if (!hasBrain) {
               return res.json(w.updateMessage(buildHelpMessage(
-                '⏰ Reminder settings live in your Kitten Brain — please click *🧠 Create Kitten Brain* first, then open the settings again.', [], hasBrain)));
+                '⏰ Reminder settings live in your Kitten Brain — please click *🧠 Create Kitten Brain* first, then open the settings again.', [], hasBrain, adminUser)));
             }
             const settings = await getSettings(ev.user?.email);
             return res.json(w.openDialog(buildReminderSettingsCardObject(settings)));
@@ -588,6 +598,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             const result = await setSettings(ev.user?.email, {
               reminders_enabled: picked.includes('reminders_enabled'),
               daily_tasks: picked.includes('daily_tasks'),
+              morning_brief: picked.includes('morning_brief'),
               task_create: picked.includes('task_create'),
               digest_hour: newHour
             }).catch(err => { console.error('❌ settings save failed:', err.message); return 'error'; });
@@ -597,20 +608,105 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             if (result === 'error') {
               return res.json(w.closeDialog('😿 Could not save your settings. Please try again.'));
             }
-            // First time the daily task reminder was enabled → tell the user
-            // the current reminder time and where to change it.
-            if (picked.includes('daily_tasks') && (!before || !before.daily_tasks)) {
+            // First time a daily reminder (tasks DM or day-brief) was enabled →
+            // tell the user the current reminder time and where to change it.
+            const firstEnable =
+              (picked.includes('daily_tasks') && (!before || !before.daily_tasks)) ||
+              (picked.includes('morning_brief') && (!before || !before.morning_brief));
+            if (firstEnable) {
               return res.json(w.closeDialog(
-                `✅ Saved! ⏰ Your daily task reminder is currently set to ${String(newHour).padStart(2, '0')}:00 Berlin time — ` +
+                `✅ Saved! ⏰ Your daily reminder time is currently set to ${String(newHour).padStart(2, '0')}:00 Berlin time — ` +
                 'you can change it any time: type *kitten* → ⏰ Reminder settings.'));
             }
             return res.json(w.closeDialog('✅ Reminder settings saved — stored in the SETTINGS tab of your Kitten Brain sheet.'));
           }
 
           // ❓ Overview of everything the Kitten can do + this user's setup
+          // (tabbed dialog — the tab buttons re-render it via show_functions_tab)
           case 'show_functions': {
-            const settings = await getSettings(ev.user?.email).catch(() => ({ reminders_enabled: true, daily_tasks: false, task_create: true }));
-            return res.json(w.openDialog(buildFunctionsCardObject(settings, hasBrain)));
+            const settings = await getSettings(ev.user?.email).catch(() => ({ reminders_enabled: true, daily_tasks: false, morning_brief: false, task_create: true, digest_hour: 8 }));
+            return res.json(w.openDialog(buildFunctionsCardObject(settings, hasBrain, 'standard')));
+          }
+
+          case 'show_functions_tab': {
+            const settings = await getSettings(ev.user?.email).catch(() => ({ reminders_enabled: true, daily_tasks: false, morning_brief: false, task_create: true, digest_hour: 8 }));
+            const tab = ['standard', 'brain', 'reminders', 'commands'].includes(ev.params?.tab) ? ev.params.tab : 'standard';
+            return res.json(w.updateDialog(buildFunctionsCardObject(settings, hasBrain, tab)));
+          }
+
+          // 🛠️ Admin area — only for emails in the "Admin access" tab of the
+          // central sheet. Every send ALSO requires the security key (env
+          // ADMIN_JOB_KEY) typed into the dialog.
+          case 'open_admin': {
+            if (!adminUser) {
+              return res.json(w.updateMessage(buildHelpMessage(
+                '⛔ The Admin area is only for registered Kitten admins.', [], hasBrain, adminUser)));
+            }
+            const jobs = Object.entries(ANNOUNCEMENTS).map(([value, a]) => ({ value, label: a.label }));
+            return res.json(w.openDialog(buildAdminCardObject(jobs, 'dm-all', ANNOUNCEMENTS['dm-all'].text('{first name}'))));
+          }
+
+          // dropdown changed → re-render the dialog with the message preview
+          case 'admin_select_job': {
+            if (!adminUser) return res.json(w.closeDialog('⛔ Admins only.'));
+            const sel = ev.formInputs?.admin_job?.stringInputs?.value?.[0];
+            const job = ANNOUNCEMENTS[sel] ? sel : 'dm-all';
+            const jobs = Object.entries(ANNOUNCEMENTS).map(([value, a]) => ({ value, label: a.label }));
+            return res.json(w.updateDialog(buildAdminCardObject(jobs, job, ANNOUNCEMENTS[job].text('{first name}'))));
+          }
+
+          // send a prepared announcement to EVERYONE
+          case 'admin_send_job': {
+            if (!adminUser) return res.json(w.closeDialog('⛔ Admins only.'));
+            const key = (ev.formInputs?.admin_key?.stringInputs?.value?.[0] || '').trim();
+            if (!process.env.ADMIN_JOB_KEY || key !== process.env.ADMIN_JOB_KEY) {
+              return res.json(w.closeDialog('⛔ Wrong security key — nothing was sent.'));
+            }
+            const sel = ev.formInputs?.admin_job?.stringInputs?.value?.[0];
+            const job = ANNOUNCEMENTS[sel];
+            if (!job) return res.json(w.closeDialog('⚠️ Please pick a message first.'));
+            console.log(`🛠️ Admin ${ev.user?.email} sends "${sel}" to everyone.`);
+            dmEveryone(job.label, job.text)
+              .catch(err => postOps(`🚨 *Admin send (${sel}) crashed:* ${err.message}`));
+            return res.json(w.closeDialog(`🚀 Sending "${job.label}" to everyone in the background — summary goes to the ops space.`));
+          }
+
+          // send a CUSTOM broadcast to EVERYONE
+          case 'admin_send_custom': {
+            if (!adminUser) return res.json(w.closeDialog('⛔ Admins only.'));
+            const key = (ev.formInputs?.admin_key2?.stringInputs?.value?.[0] || '').trim();
+            if (!process.env.ADMIN_JOB_KEY || key !== process.env.ADMIN_JOB_KEY) {
+              return res.json(w.closeDialog('⛔ Wrong security key — nothing was sent.'));
+            }
+            const msg = (ev.formInputs?.admin_custom_msg?.stringInputs?.value?.[0] || '').trim();
+            if (!msg) return res.json(w.closeDialog('⚠️ The message was empty — nothing was sent.'));
+            console.log(`🛠️ Admin ${ev.user?.email} sends a custom broadcast to everyone.`);
+            dmEveryone('📢 Custom broadcast', () => `📢 *Announcement from USC IT:*\n\n${msg}`)
+              .catch(err => postOps(`🚨 *Admin custom broadcast crashed:* ${err.message}`));
+            return res.json(w.closeDialog('🚀 Sending your broadcast to everyone in the background — summary goes to the ops space.'));
+          }
+
+          // send a test DM to ONE person only
+          case 'admin_send_test': {
+            if (!adminUser) return res.json(w.closeDialog('⛔ Admins only.'));
+            const key = (ev.formInputs?.admin_test_key?.stringInputs?.value?.[0] || '').trim();
+            if (!process.env.ADMIN_JOB_KEY || key !== process.env.ADMIN_JOB_KEY) {
+              return res.json(w.closeDialog('⛔ Wrong security key — nothing was sent.'));
+            }
+            const email = (ev.formInputs?.admin_test_email?.stringInputs?.value?.[0] || '').trim();
+            const msg = (ev.formInputs?.admin_test_msg?.stringInputs?.value?.[0] || '').trim();
+            if (!email || !email.includes('@') || !msg) {
+              return res.json(w.closeDialog('⚠️ Please fill in a valid tester email AND a message — nothing was sent.'));
+            }
+            try {
+              const ok = await sendDm(email, msg);
+              return res.json(w.closeDialog(ok
+                ? `✅ Test DM sent to ${email}.`
+                : `❌ Could not DM ${email} — no DM channel with the Kitten yet?`));
+            } catch (err) {
+              console.error('❌ Admin test DM failed:', err.message);
+              return res.json(w.closeDialog(`❌ Test DM failed: ${err.message}`));
+            }
           }
 
           // 📝 Task dialog (prefilled from the chat message) + creation
@@ -662,7 +758,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'option_6': {
             const email = ev.user?.email;
             if (!email) {
-              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.', [], hasBrain)));
+              return res.json(w.updateMessage(buildHelpMessage('❌ Could not determine your email address.', [], hasBrain, adminUser)));
             }
             try {
               const requestedPage = Number(ev.params?.page || 0);
@@ -686,10 +782,10 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               }
               const extraWidgets = navButtons.length ? [{ buttonList: { buttons: navButtons } }] : [];
 
-              return res.json(w.updateMessage(buildHelpMessage(text, extraWidgets, hasBrain)));
+              return res.json(w.updateMessage(buildHelpMessage(text, extraWidgets, hasBrain, adminUser)));
             } catch (err) {
               console.error('❌ Fetching tickets failed:', err.response?.data || err.message);
-              return res.json(w.updateMessage(buildHelpMessage('❌ Sorry, I couldn’t fetch your Jira tickets. Please try again later.', [], hasBrain)));
+              return res.json(w.updateMessage(buildHelpMessage('❌ Sorry, I couldn’t fetch your Jira tickets. Please try again later.', [], hasBrain, adminUser)));
             }
           }
 
@@ -697,15 +793,15 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'faq_search': {
             const query = (ev.formInputs?.faq_query?.stringInputs?.value?.[0] || '').trim();
             if (query.length < 2) {
-              return res.json(w.updateMessage(buildHelpMessage('Please type at least 2 characters into the search field. 🔎', [], hasBrain)));
+              return res.json(w.updateMessage(buildHelpMessage('Please type at least 2 characters into the search field. 🔎', [], hasBrain, adminUser)));
             }
             try {
               const matches = await searchFAQs(query);
               console.log(`🔎 FAQ search "${query}" → ${matches.length} match(es)`);
-              return res.json(w.updateMessage(buildFaqResultsMessage(query, matches, hasBrain)));
+              return res.json(w.updateMessage(buildFaqResultsMessage(query, matches, hasBrain, adminUser)));
             } catch (err) {
               console.error('❌ FAQ search failed:', err.message);
-              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ search is unavailable right now. Please tell Marcus Gallein.', [], hasBrain)));
+              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ search is unavailable right now. Please tell Marcus Gallein.', [], hasBrain, adminUser)));
             }
           }
 
@@ -720,18 +816,18 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               if (allSel) {
                 const query = allSel.slice('__all__:'.length);
                 const matches = await searchFAQs(query);
-                return res.json(w.updateMessage(buildFaqResultsMessage(query, matches, hasBrain)));
+                return res.json(w.updateMessage(buildFaqResultsMessage(query, matches, hasBrain, adminUser)));
               }
 
               const faqs = (await Promise.all(values.map(v => findFAQ(v)))).filter(Boolean);
-              if (!faqs.length) return res.json(w.updateMessage(buildHelpMessage(undefined, [], hasBrain)));
+              if (!faqs.length) return res.json(w.updateMessage(buildHelpMessage(undefined, [], hasBrain, adminUser)));
 
-              const response = w.updateMessage(buildSelectionMessage(faqs, hasBrain));
+              const response = w.updateMessage(buildSelectionMessage(faqs, hasBrain, adminUser));
               if (process.env.ENABLE_DEBUG_EVENTS === '1') console.log('📤 RESPONSE:', JSON.stringify(response).slice(0, 500));
               return res.json(response);
             } catch (err) {
               console.error('❌ FAQ selection failed:', err.message);
-              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.', [], hasBrain)));
+              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.', [], hasBrain, adminUser)));
             }
           }
 
@@ -740,10 +836,10 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             try {
               const faq = await findFAQ(ev.params?.faq_value);
               const responseText = faq?.responseText || 'Hmm. I’m not sure how to help with that yet. 💥';
-              return res.json(w.updateMessage(buildAnswerMessage(responseText, hasBrain)));
+              return res.json(w.updateMessage(buildAnswerMessage(responseText, hasBrain, adminUser)));
             } catch (err) {
               console.error('❌ FAQ lookup failed:', err.message);
-              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.', [], hasBrain)));
+              return res.json(w.updateMessage(buildHelpMessage('⚠️ FAQ lookup failed. Please tell Marcus Gallein.', [], hasBrain, adminUser)));
             }
           }
 
@@ -768,7 +864,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
 
           // All other menu buttons → update the message with (placeholder) answer + menu
           default:
-            return res.json(w.updateMessage(buildAnswerMessage(answerTextFor(ev.fn), hasBrain)));
+            return res.json(w.updateMessage(buildAnswerMessage(answerTextFor(ev.fn), hasBrain, adminUser)));
         }
       }
 
