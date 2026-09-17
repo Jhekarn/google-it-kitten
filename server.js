@@ -143,7 +143,7 @@ cron.schedule('0 * * * *', async () => {
 }, { timezone: 'Europe/Berlin' });
 
 // EVERY MINUTE: deliver due one-off reminders ("remind me in 2 hours ...").
-// A single central sheet read per tick; quiet unless something was sent.
+// A single central index read per tick; quiet unless something was sent.
 let reminderFailStreak = 0;
 cron.schedule('* * * * *', async () => {
   try {
@@ -440,6 +440,11 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           }
           const result = await addReminder(ev.user?.email, parsed.dueMs, parsed.text)
             .catch(err => { console.error('❌ reminder store failed:', err.message); return 'error'; });
+          if (result === 'no_brain') {
+            return res.json(w.newMessage({
+              text: '🧠 Your reminders are stored privately in your Kitten Brain — and you don\'t have one yet! Type *kitten* and click *🧠 Create Kitten Brain*, then set your reminder again.'
+            }));
+          }
           if (result === 'past') return res.json(w.newMessage({ text: '⏰ That time is already in the past — try a future one. 😉' }));
           if (result === 'too_far') return res.json(w.newMessage({ text: '⏰ That\'s more than a year away — I can only remember reminders up to 1 year ahead.' }));
           if (result === 'too_long') return res.json(w.newMessage({ text: '⏰ That reminder text is too long — please keep it under 300 characters.' }));
@@ -592,9 +597,9 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           // ⏱️ My reminders dialog: list all open one-off reminders with a
           // Cancel button each (cancel re-renders the dialog with the rest).
           case 'open_my_reminders': {
-            const mine = await listOpenReminders(ev.user?.email).catch(() => []);
+            const mine = hasBrain ? await listOpenReminders(ev.user?.email).catch(() => []) : [];
             return res.json(w.openDialog(buildMyRemindersCardObject(
-              mine.map(r => ({ row: r.row, when: fmtBerlin(r.dueMs), text: r.text })))));
+              mine.map(r => ({ row: r.row, when: fmtBerlin(r.dueMs), text: r.text })), hasBrain)));
           }
 
           case 'cancel_reminder_row': {
@@ -603,9 +608,9 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               await cancelReminderByRow(ev.user?.email, row)
                 .catch(err => console.error('❌ dialog cancel failed:', err.message));
             }
-            const mine = await listOpenReminders(ev.user?.email).catch(() => []);
+            const mine = hasBrain ? await listOpenReminders(ev.user?.email).catch(() => []) : [];
             return res.json(w.updateDialog(buildMyRemindersCardObject(
-              mine.map(r => ({ row: r.row, when: fmtBerlin(r.dueMs), text: r.text })))));
+              mine.map(r => ({ row: r.row, when: fmtBerlin(r.dueMs), text: r.text })), hasBrain)));
           }
 
           case 'reminder_settings_submit': {
