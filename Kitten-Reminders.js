@@ -1,22 +1,27 @@
 // Kitten-Reminders.js — one-off reminders ("remind me in 2 hours to ...").
 //
-// Storage: CENTRAL spreadsheet (SPREADSHEET_ID), tab REMINDERS:
-//   A: Email | B: Due (ISO, UTC) | C: Reminder text | D: Status
-//   Status: empty = open · ISO timestamp = sent · "cancelled ..." = cancelled
-//           · "failed ..." = DM could not be delivered (not retried)
+// PRIVACY-FIRST storage (v2.6.2):
+//  - The reminder TEXT lives in the USER'S OWN Kitten Brain spreadsheet, in a
+//    tab called REMINDERS (columns: Due ISO UTC | Reminder | Status). Only the
+//    user (and the app acting as them) can read it — like their memories.
+//  - The CENTRAL spreadsheet only keeps a schedule INDEX in the tab
+//    REMINDER_INDEX (columns: Email | Due ISO UTC | Status) — NO reminder
+//    text, ever. This index is what allows ONE central read per minute to
+//    find due reminders; scanning every user's personal sheet each minute
+//    would blow the Sheets quota at 500+ users.
+//  - Consequently, one-off reminders REQUIRE a Kitten Brain ('no_brain').
 //
-// NOTE: unlike Kitten Brain memories, these rows live in the central sheet so
-// ONE read per minute can serve every user (a per-user sheet scan for 500+
-// users every minute would blow the Sheets quota). Reminder texts are
-// therefore visible to whoever can open the central sheet (= IT). The chat
-// confirmation tells users that reminders are stored centrally.
+// Status values (both sheets): empty = open · ISO timestamp = sent ·
+// "cancelled ..." · "failed ..." (delivery failed / text missing — not retried).
 //
 // server.js runs checkDueReminders() every minute via cron.
 
 const { getSheetsClient } = require('./GoogleSheet-Handler');
 const { sendDm } = require('./Chat-Poster');
+const { getBrain, getUserClients } = require('./Kitten-Brain');
 
-const TAB = 'REMINDERS';
+const USER_TAB = 'REMINDERS';        // tab in the USER's brain sheet (text lives here)
+const INDEX_TAB = 'REMINDER_INDEX';  // central schedule index (no text!)
 const MAX_TEXT = 300;
 const MAX_AHEAD_MS = 366 * 24 * 60 * 60 * 1000; // max 1 year ahead
 
@@ -142,50 +147,61 @@ function parseReminder(raw, nowMs = Date.now()) {
   return null;
 }
 
-// ---------- storage ----------
+// ---------- storage: user's brain sheet (text) ----------
 
-async function ensureTab() {
-  const sheets = getSheetsClient();
+// User-impersonated sheets client + brain sheet id (null when no brain).
+async function userSheet(email) {
+  const brain = await getBrain(email);
+  if (!brain) return null;
+  const { sheets } = getUserClients(email);
+  return { sheets, sheetId: brain.sheetId };
+}
+
+async function ensureUserTab(email, u) {
   try {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: process.env.SPREADSHEET_ID,
-      requestBody: { requests: [{ addSheet: { properties: { title: TAB } } }] }
+    await u.sheets.spreadsheets.batchUpdate({
+      spreadsheetId: u.sheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: USER_TAB } } }] }
     });
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: process.env.SPREADSHEET_ID,
-      range: `${TAB}!A1:D1`,
+    await u.sheets.spreadsheets.values.update({
+      spreadsheetId: u.sheetId,
+      range: `${USER_TAB}!A1:C1`,
       valueInputOption: 'USER_ENTERED',
-      requestBody: { values: [['Email', 'Due (UTC)', 'Reminder', 'Status']] }
+      requestBody: { values: [['Due (UTC)', 'Reminder', 'Status']] }
     });
-    console.log('⏰ Created REMINDERS tab.');
+    console.log(`⏰ Created REMINDERS tab in ${email}'s brain sheet.`);
   } catch (err) {
     if (!/already exists/i.test(err.message)) throw err;
   }
 }
 
-// Returns 'saved' | 'past' | 'too_far' | 'too_long'
-async function addReminder(email, dueMs, text) {
-  if (dueMs <= Date.now()) return 'past';
-  if (dueMs > Date.now() + MAX_AHEAD_MS) return 'too_far';
-  if ((text || '').length > MAX_TEXT) return 'too_long';
-  await ensureTab();
+// ---------- storage: central schedule index (NO text) ----------
+
+async function ensureIndexTab() {
   const sheets = getSheetsClient();
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.SPREADSHEET_ID,
-    range: `${TAB}!A:D`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [[(email || '').toLowerCase(), new Date(dueMs).toISOString(), text, '']] }
-  });
-  console.log(`⏰ Reminder stored for ${email}: ${new Date(dueMs).toISOString()} "${text.slice(0, 60)}"`);
-  return 'saved';
+  try {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      requestBody: { requests: [{ addSheet: { properties: { title: INDEX_TAB } } }] }
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: `${INDEX_TAB}!A1:C1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [['Email', 'Due (UTC)', 'Status']] }
+    });
+    console.log('⏰ Created REMINDER_INDEX tab (schedule only — no reminder texts).');
+  } catch (err) {
+    if (!/already exists/i.test(err.message)) throw err;
+  }
 }
 
-async function readAllRows() {
+async function readIndexRows() {
   const sheets = getSheetsClient();
   try {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: process.env.SPREADSHEET_ID,
-      range: `${TAB}!A2:D`
+      range: `${INDEX_TAB}!A2:C`
     });
     return res.data.values || [];
   } catch (err) {
@@ -194,28 +210,109 @@ async function readAllRows() {
   }
 }
 
-// Open (unsent, uncancelled) reminders of ONE user, with their sheet row numbers.
-async function listOpenReminders(email) {
-  const rows = (await readAllRows()) || [];
-  const mine = [];
+async function markIndexRow(row, status) {
+  const sheets = getSheetsClient();
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${INDEX_TAB}!C${row}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [[status]] }
+  });
+}
+
+// Mark the first OPEN index entry matching this user + due time.
+async function markIndexEntry(email, dueMs, status) {
+  const rows = (await readIndexRows()) || [];
   const key = (email || '').toLowerCase();
   for (let i = 0; i < rows.length; i++) {
-    const [rowEmail, dueIso, text, status] = rows[i];
-    if ((rowEmail || '').toLowerCase() !== key || status || !dueIso) continue;
-    mine.push({ row: i + 2, dueMs: Date.parse(dueIso), text: text || '' });
+    const [e, dueIso, s] = rows[i];
+    if (s || !e || !dueIso) continue;
+    if (e.toLowerCase() === key && Date.parse(dueIso) === dueMs) {
+      await markIndexRow(i + 2, status);
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---------- public API ----------
+
+// Returns 'saved' | 'no_brain' | 'past' | 'too_far' | 'too_long'
+async function addReminder(email, dueMs, text) {
+  if (dueMs <= Date.now()) return 'past';
+  if (dueMs > Date.now() + MAX_AHEAD_MS) return 'too_far';
+  if ((text || '').length > MAX_TEXT) return 'too_long';
+
+  const u = await userSheet(email);
+  if (!u) return 'no_brain';
+  const dueIso = new Date(dueMs).toISOString();
+
+  // 1) text into the USER's own sheet
+  await ensureUserTab(email, u);
+  await u.sheets.spreadsheets.values.append({
+    spreadsheetId: u.sheetId,
+    range: `${USER_TAB}!A:C`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [[dueIso, text, '']] }
+  });
+
+  // 2) schedule entry (email + time only) into the central index
+  await ensureIndexTab();
+  const sheets = getSheetsClient();
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${INDEX_TAB}!A:C`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [[(email || '').toLowerCase(), dueIso, '']] }
+  });
+
+  console.log(`⏰ Reminder stored for ${email}: ${dueIso} (text in their brain sheet)`);
+  return 'saved';
+}
+
+// Open (unsent, uncancelled) reminders of ONE user — read from THEIR sheet.
+// Returns [] when the user has no brain / no reminders tab yet.
+async function listOpenReminders(email) {
+  const u = await userSheet(email);
+  if (!u) return [];
+  let rows = [];
+  try {
+    const res = await u.sheets.spreadsheets.values.get({
+      spreadsheetId: u.sheetId,
+      range: `${USER_TAB}!A2:C`
+    });
+    rows = res.data.values || [];
+  } catch (err) {
+    if (/Unable to parse range/i.test(err.message)) return []; // no tab yet
+    throw err;
+  }
+  const mine = [];
+  for (let i = 0; i < rows.length; i++) {
+    const [dueIso, text, status] = rows[i];
+    if (!dueIso || status) continue;
+    const dueMs = Date.parse(dueIso);
+    if (Number.isNaN(dueMs)) continue;
+    mine.push({ row: i + 2, dueMs, text: text || '' });
   }
   mine.sort((a, b) => a.dueMs - b.dueMs);
   return mine;
 }
 
-async function markRowCancelled(email, pick) {
-  const sheets = getSheetsClient();
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: process.env.SPREADSHEET_ID,
-    range: `${TAB}!D${pick.row}`,
+async function markUserRow(email, row, status) {
+  const u = await userSheet(email);
+  if (!u) return;
+  await u.sheets.spreadsheets.values.update({
+    spreadsheetId: u.sheetId,
+    range: `${USER_TAB}!C${row}`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [[`cancelled ${new Date().toISOString()}`]] }
+    requestBody: { values: [[status]] }
   });
+}
+
+async function markRowCancelled(email, pick) {
+  const status = `cancelled ${new Date().toISOString()}`;
+  await markUserRow(email, pick.row, status);
+  await markIndexEntry(email, pick.dueMs, status).catch(() => null);
   console.log(`⏰ Reminder cancelled for ${email}: row ${pick.row}`);
   return pick;
 }
@@ -229,7 +326,7 @@ async function cancelReminder(email, n) {
   return markRowCancelled(email, pick);
 }
 
-// Cancel one open reminder by its SHEET ROW number (used by the ⏱️ My
+// Cancel one open reminder by its row in the USER's sheet (used by the ⏱️ My
 // reminders dialog buttons — row numbers are stable while the dialog is
 // open, list positions are not). Only cancels rows that belong to THIS
 // user and are still open. Returns the cancelled reminder or null.
@@ -247,29 +344,45 @@ async function checkDueReminders() {
   if (checking) return null; // previous run still going — skip this tick
   checking = true;
   try {
-    const rows = await readAllRows();
+    const rows = await readIndexRows();
     if (!rows) return null;
-    const sheets = getSheetsClient();
     const now = Date.now();
     let sent = 0, failed = 0;
+    const userCache = new Map(); // email -> that user's open reminders (one read per user per tick)
+
     for (let i = 0; i < rows.length; i++) {
-      const [email, dueIso, text, status] = rows[i];
+      const [email, dueIso, status] = rows[i];
       if (!email || status || !dueIso) continue;
       const due = Date.parse(dueIso);
       if (Number.isNaN(due) || due > now) continue;
+
+      // fetch the TEXT from the user's own sheet
+      let match = null;
+      try {
+        if (!userCache.has(email)) userCache.set(email, await listOpenReminders(email));
+        match = userCache.get(email).find(r => r.dueMs === due && !r.delivered) || null;
+        if (match) match.delivered = true; // handle two identical due times in one tick
+      } catch (err) {
+        console.warn(`⚠️ reminder text lookup failed for ${email}: ${err.message}`);
+      }
+
+      if (!match) {
+        // brain/tab/row gone (user deleted it) — mark the index entry, don't retry
+        await markIndexRow(i + 2, `failed ${new Date().toISOString()} (not found in brain)`).catch(() => null);
+        failed++;
+        continue;
+      }
+
       let ok = false;
       try {
-        ok = await sendDm(email, `⏰ *Reminder:* ${text} 🐾`);
+        ok = await sendDm(email, `⏰ *Reminder:* ${match.text} 🐾`);
       } catch (err) {
         console.warn(`⚠️ reminder DM failed for ${email}: ${err.message}`);
       }
-      // mark the row either way — a broken DM channel must not retry forever
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: process.env.SPREADSHEET_ID,
-        range: `${TAB}!D${i + 2}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[ok ? new Date().toISOString() : `failed ${new Date().toISOString()}`]] }
-      });
+      const stamp = ok ? new Date().toISOString() : `failed ${new Date().toISOString()}`;
+      // mark BOTH sheets either way — a broken DM channel must not retry forever
+      await markUserRow(email, match.row, stamp).catch(() => null);
+      await markIndexRow(i + 2, stamp).catch(() => null);
       ok ? sent++ : failed++;
       await new Promise(r => setTimeout(r, 250));
     }
