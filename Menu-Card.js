@@ -521,18 +521,47 @@ function functionsTabContent(tab, settings, hasBrain) {
 }
 
 function buildFunctionsCardObject(settings, hasBrain, tab = 'standard') {
-  const tabBar = {
+  // Side-nav layout (like Google's own settings dialogs): tab buttons
+  // stacked vertically in a narrow LEFT column, content in the RIGHT column.
+  // The current tab is disabled (= greyed out, "you are here").
+  const navWidgets = FUNCTION_TABS.map(t => ({
     buttonList: {
-      buttons: FUNCTION_TABS.map(t => ({
+      buttons: [{
         text: t.id === tab ? `▸ ${t.label}` : t.label,
+        disabled: t.id === tab,
         onClick: buttonAction('show_functions_tab', false, [{ key: 'tab', value: t.id }])
-      }))
+      }]
     }
-  };
+  }));
+  const content = functionsTabContent(tab, settings, hasBrain);
   return {
     sections: [
-      { header: '🐱 What IT Kitten can do', widgets: [tabBar] },
-      functionsTabContent(tab, settings, hasBrain)
+      {
+        header: '🐱 What IT Kitten can do',
+        widgets: [
+          {
+            columns: {
+              columnItems: [
+                {
+                  horizontalSizeStyle: 'FILL_MINIMUM_SPACE',
+                  horizontalAlignment: 'START',
+                  verticalAlignment: 'TOP',
+                  widgets: navWidgets
+                },
+                {
+                  horizontalSizeStyle: 'FILL_AVAILABLE_SPACE',
+                  horizontalAlignment: 'START',
+                  verticalAlignment: 'TOP',
+                  widgets: [
+                    { textParagraph: { text: `<b>${content.header}</b>` } },
+                    ...content.widgets
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
     ]
   };
 }
