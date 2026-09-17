@@ -15,6 +15,18 @@
 // We reuse CHAT_APP_AUDIENCE (the /chat URL) as that endpoint.
 const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
+// ---- Version & bug reporting (shown small at the bottom of the menu) ----
+// Bump KITTEN_VERSION with every deploy that changes behavior.
+const KITTEN_VERSION = '2.6.0';
+// Chat cards cannot open the OS mail app, so "Report a Bug" opens a
+// PREFILLED Gmail compose window instead (same result, works for everyone
+// in the Workspace domain).
+const BUG_REPORT_URL =
+  'https://mail.google.com/mail/?view=cm&fs=1' +
+  '&to=' + encodeURIComponent('it-support@urbansportsclub.com') +
+  '&su=' + encodeURIComponent('Bugreport for IT Kitten (Google Chat Version)') +
+  '&body=' + encodeURIComponent(`Kitten version: v${KITTEN_VERSION}\n\nWhat happened:\n\nWhat did you expect:\n`);
+
 function buttonAction(actionName, opensDialog = false, extraParams = []) {
   const action = {
     function: ACTION_ENDPOINT,
@@ -47,7 +59,7 @@ function extractUrls(text) {
 }
 
 // An answer message: text + "Open link" button(s) that open in a new tab
-function buildAnswerMessage(text, hasBrain = false) {
+function buildAnswerMessage(text, hasBrain = false, isAdmin = false) {
   const urls = extractUrls(text).slice(0, 3);
   const widgets = urls.length
     ? [{
@@ -59,13 +71,14 @@ function buildAnswerMessage(text, hasBrain = false) {
         }
       }]
     : [];
-  return buildHelpMessage(text, widgets, hasBrain);
+  return buildHelpMessage(text, widgets, hasBrain, isAdmin);
 }
 
 // The menu buttons — same order & ids as in Slack's Menu-Buttons.js.
-// The Kitten Brain button label depends on whether THIS user already has one.
-function menuButtons(hasBrain = false) {
-  return [
+// The Kitten Brain button label depends on whether THIS user already has one;
+// the 🛠️ Admin button only appears for emails in the "Admin access" tab.
+function menuButtons(hasBrain = false, isAdmin = false) {
+  const buttons = [
     { text: '🎫 Create a Jira Ticket',        functionName: 'open_jira_modal', opensDialog: true }, // option_1
     { text: '❓ HowTo section',                functionName: 'option_2' },
     { text: '⚒️ Request accounts',             functionName: 'option_3' },
@@ -76,12 +89,14 @@ function menuButtons(hasBrain = false) {
     { text: '⏰ Reminder settings',            functionName: 'open_reminder_settings', opensDialog: true },
     { text: '❓ What can I do?',               functionName: 'show_functions', opensDialog: true }
   ];
+  if (isAdmin) buttons.push({ text: '🛠️ Admin', functionName: 'open_admin', opensDialog: true });
+  return buttons;
 }
 
 // The inner card (Cards v2 "card" object).
 // extraWidgets are rendered between the header text and the FAQ search —
 // used for FAQ search results.
-function buildHelpCardObject(headerText = 'Hi there! What do you need help with?', extraWidgets = [], hasBrain = false) {
+function buildHelpCardObject(headerText = 'Hi there! What do you need help with?', extraWidgets = [], hasBrain = false, isAdmin = false) {
   return {
     header: {
       title: 'IT Kitten 🐱',
@@ -116,10 +131,22 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
         widgets: [
           {
             buttonList: {
-              buttons: menuButtons(hasBrain).map(b => ({
+              buttons: menuButtons(hasBrain, isAdmin).map(b => ({
                 text: b.text,
                 onClick: buttonAction(b.functionName, b.opensDialog)
               }))
+            }
+          }
+        ]
+      },
+      {
+        // small, muted footer: version + bug report link
+        widgets: [
+          {
+            textParagraph: {
+              text:
+                `<font color="#80868B">IT Kitten v${KITTEN_VERSION}\n` +
+                `<a href="${BUG_REPORT_URL}">🐞 Report a Bug</a></font>`
             }
           }
         ]
@@ -129,11 +156,11 @@ function buildHelpCardObject(headerText = 'Hi there! What do you need help with?
 }
 
 // A complete Chat "message" object with the help card
-function buildHelpMessage(headerText, extraWidgets = [], hasBrain = false) {
+function buildHelpMessage(headerText, extraWidgets = [], hasBrain = false, isAdmin = false) {
   return {
     text: 'IT Kitten help menu',
     cardsV2: [
-      { cardId: 'kitten_help_menu', card: buildHelpCardObject(headerText, extraWidgets, hasBrain) }
+      { cardId: 'kitten_help_menu', card: buildHelpCardObject(headerText, extraWidgets, hasBrain, isAdmin) }
     ]
   };
 }
@@ -153,9 +180,9 @@ function isLinkOnlyAnswer(responseText) {
 // FAQ search results: matching FAQ titles as buttons.
 // Link-only answers open the page DIRECTLY (new tab); text answers show
 // the answer card (which itself carries an Open-link button when needed).
-function buildFaqResultsMessage(query, matches, hasBrain = false) {
+function buildFaqResultsMessage(query, matches, hasBrain = false, isAdmin = false) {
   if (!matches.length) {
-    return buildHelpMessage(`Hmm. I found nothing for "<b>${query}</b>". 💥 Try another keyword.`, [], hasBrain);
+    return buildHelpMessage(`Hmm. I found nothing for "<b>${query}</b>". 💥 Try another keyword.`, [], hasBrain, isAdmin);
   }
 
   const resultButtons = {
@@ -178,25 +205,26 @@ function buildFaqResultsMessage(query, matches, hasBrain = false) {
   return buildHelpMessage(
     `Results for "<b>${query}</b>" — click one:`,
     [resultButtons],
-    hasBrain
+    hasBrain,
+    isAdmin
   );
 }
 
 // Message after the user picked FAQ(s) from the autocomplete dropdown:
 // a single text answer is shown directly; link-only or multiple picks
 // become buttons (link-only ones open the page directly, new tab).
-function buildSelectionMessage(faqs, hasBrain = false) {
+function buildSelectionMessage(faqs, hasBrain = false, isAdmin = false) {
   if (!faqs.length) {
-    return buildHelpMessage('Hmm. I couldn’t find that FAQ anymore. 💥 Try the search again.', [], hasBrain);
+    return buildHelpMessage('Hmm. I couldn’t find that FAQ anymore. 💥 Try the search again.', [], hasBrain, isAdmin);
   }
   if (faqs.length === 1 && !isLinkOnlyAnswer(faqs[0].responseText)) {
     const txt = (faqs[0].responseText || '').trim();
     if (!txt) {
-      return buildHelpMessage(`ℹ️ "<b>${faqs[0].suggestion}</b>" has no help text stored in the FAQ DB yet. Please tell Marcus Gallein.`, [], hasBrain);
+      return buildHelpMessage(`ℹ️ "<b>${faqs[0].suggestion}</b>" has no help text stored in the FAQ DB yet. Please tell Marcus Gallein.`, [], hasBrain, isAdmin);
     }
-    return buildAnswerMessage(txt, hasBrain);
+    return buildAnswerMessage(txt, hasBrain, isAdmin);
   }
-  return buildFaqResultsMessage('your selection', faqs, hasBrain);
+  return buildFaqResultsMessage('your selection', faqs, hasBrain, isAdmin);
 }
 
 // Menu answers, ported from Slack's Menu-Buttons.js.
@@ -368,6 +396,7 @@ function buildReminderSettingsCardObject(settings) {
               items: [
                 { text: '🔔 Send me reminders (master switch)', value: 'reminders_enabled', selected: !!settings.reminders_enabled },
                 { text: '⏰ Remind me of my tasks due today (daily DM)', value: 'daily_tasks', selected: !!settings.daily_tasks },
+                { text: '🌅 Morning day-brief (today\'s meetings, daily DM)', value: 'morning_brief', selected: !!settings.morning_brief },
                 { text: '📝 Allow "create me a task ..." via chat', value: 'task_create', selected: !!settings.task_create }
               ]
             }
@@ -376,7 +405,7 @@ function buildReminderSettingsCardObject(settings) {
             selectionInput: {
               name: 'digest_hour',
               type: 'DROPDOWN',
-              label: '🕗 Daily task reminder time (Berlin time)',
+              label: '🕗 Daily reminder time (Berlin) — tasks & day-brief',
               items: Array.from({ length: 15 }, (_, i) => {
                 const h = i + 6; // 06:00 … 20:00
                 return { text: `${String(h).padStart(2, '0')}:00`, value: String(h), selected: Number(settings.digest_hour) === h };
@@ -394,51 +423,203 @@ function buildReminderSettingsCardObject(settings) {
   };
 }
 
-// ---------- ❓ "What can I do?" overview dialog ----------
-function buildFunctionsCardObject(settings, hasBrain) {
+// ---------- ❓ "What can I do?" overview dialog (tabbed) ----------
+// Chat dialogs have no native side-nav tabs, so a button row at the top
+// switches the card content (via updateCard navigation → show_functions_tab).
+const FUNCTION_TABS = [
+  { id: 'standard',  label: '⚙️ Standard functions' },
+  { id: 'brain',     label: '🧠 Kitten Brain' },
+  { id: 'reminders', label: '⏰ Reminders' },
+  { id: 'commands',  label: '⌨️ Chat commands' }
+];
+
+function functionsTabContent(tab, settings, hasBrain) {
   const on = v => (v ? '✅ ON' : '❌ OFF');
+  const hour = String(settings.digest_hour ?? 8).padStart(2, '0');
+
+  if (tab === 'brain') {
+    return {
+      header: '🧠 Kitten Brain — your private memory',
+      widgets: [{
+        textParagraph: {
+          text:
+            `Status: ${hasBrain ? '✅ created' : '❌ not created yet — menu → 🧠 Create Kitten Brain'}\n\n` +
+            '• <b>remember ...</b> — I store it in YOUR own Google Drive, visible only to you\n' +
+            '• <b>forget ...</b> — I show you where to delete it (you stay in control)\n' +
+            '• Your memories are only ever used in YOUR conversations with me\n' +
+            '• The folder "Kitten Brain" in your Drive must not be deleted\n' +
+            '• Your ⏰ Reminder settings are stored there too (SETTINGS tab)'
+        }
+      }]
+    };
+  }
+
+  if (tab === 'reminders') {
+    return {
+      header: '⏰ Reminders — features & your current setup',
+      widgets: [{
+        textParagraph: {
+          text:
+            '<b>What I can do:</b>\n' +
+            '⏰ Daily "tasks due today" DM — your open Google Tasks every morning\n' +
+            '🌅 Morning day-brief — today\'s meetings (+ tasks) in one morning DM\n' +
+            '⏱️ One-off reminders — "remind me in 2 hours to ..." (see Chat commands)\n' +
+            '📝 Create Google Tasks by chat — I never delete or complete tasks\n\n' +
+            '<b>Your current setup:</b>\n' +
+            `🔔 Reminders (master switch): ${on(settings.reminders_enabled)}\n` +
+            `⏰ Daily tasks DM (${hour}:00 Berlin): ${on(settings.daily_tasks)}\n` +
+            `🌅 Morning day-brief (${hour}:00 Berlin): ${on(settings.morning_brief)}\n` +
+            `📝 "create me a task ..." via chat: ${on(settings.task_create)}\n\n` +
+            `Change these: menu → ⏰ Reminder settings${hasBrain ? '' : ' (needs a Kitten Brain first)'}`
+        }
+      }]
+    };
+  }
+
+  if (tab === 'commands') {
+    return {
+      header: '⌨️ Chat commands — just type these to me',
+      widgets: [{
+        textParagraph: {
+          text:
+            '<b>kitten</b> / <b>kitty</b> / <b>help</b> — open the menu\n\n' +
+            '<b>create me a task for</b> ordering a new cable — new Google Task (popup with optional date)\n\n' +
+            '<b>remember</b> I use a MacBook Pro — store a private memory (needs a Kitten Brain)\n' +
+            '<b>forget</b> ... — I show you where to delete a memory\n\n' +
+            '<b>remind me in 2 hours to</b> check the deploy\n' +
+            '<b>remind me tomorrow at 9 to</b> call BEM\n' +
+            '<b>remind me on friday to</b> submit the report\n' +
+            '<b>remind me on 24.12. at 10 to</b> buy presents\n' +
+            '<b>my reminders</b> — list your open one-off reminders\n' +
+            '<b>cancel reminder 2</b> — cancel one of them\n\n' +
+            '🤖 <b>Anything else</b> — free-text questions go to my AI brain (any language)'
+        }
+      }]
+    };
+  }
+
+  // default: standard functions (all menu buttons)
+  return {
+    header: '⚙️ Standard functions — the menu buttons',
+    widgets: [{
+      textParagraph: {
+        text:
+          '🎫 <b>Create a Jira Ticket</b> — IT Helpdesk, SRE, DevX or Security\n' +
+          '❓ <b>HowTo section</b> — link to the IT knowledge base\n' +
+          '⚒️ <b>Request accounts</b> — how to request access via Okta\n' +
+          '📄 <b>Submit a New FAQ</b> — add knowledge to the FAQ database\n' +
+          '📶 <b>WiFi password</b> — office & guest WiFi\n' +
+          '📋 <b>My Open Jira Tickets</b> — your open tickets, paginated\n' +
+          '🧠 <b>Create / Gogo Kitten Brain</b> — your private memory\n' +
+          '⏰ <b>Reminder settings</b> — configure all reminder features\n' +
+          '❓ <b>What can I do?</b> — this overview\n\n' +
+          '📚 Plus the <b>FAQ live search</b> field at the top of the menu.'
+      }
+    }]
+  };
+}
+
+function buildFunctionsCardObject(settings, hasBrain, tab = 'standard') {
+  const tabBar = {
+    buttonList: {
+      buttons: FUNCTION_TABS.map(t => ({
+        text: t.id === tab ? `▸ ${t.label}` : t.label,
+        onClick: buttonAction('show_functions_tab', false, [{ key: 'tab', value: t.id }])
+      }))
+    }
+  };
+  return {
+    sections: [
+      { header: '🐱 What IT Kitten can do', widgets: [tabBar] },
+      functionsTabContent(tab, settings, hasBrain)
+    ]
+  };
+}
+
+// ---------- 🛠️ Admin dialog ----------
+// jobs: [{ value, label }] of prepared announcements; previewText is the
+// template of the selected one (with a {firstName} placeholder shown as-is).
+function buildAdminCardObject(jobs, selectedJob, previewText) {
   return {
     sections: [
       {
-        header: '🐱 What IT Kitten can do',
+        header: '📣 Prepared announcements — send to EVERYONE',
         widgets: [
           {
-            textParagraph: {
-              text:
-                '📚 <b>FAQ search</b> — type in the menu\'s search field (live suggestions)\n' +
-                '🎫 <b>Create a Jira ticket</b> — menu button (IT, SRE, DevX, Security)\n' +
-                '📋 <b>My open Jira tickets</b> — menu button (paginated list)\n' +
-                '📄 <b>Submit a new FAQ</b> — menu button\n' +
-                '📶 <b>WiFi, HowTos, account access</b> — menu buttons\n' +
-                '🤖 <b>Ask anything</b> — just type a free-text question (AI, any language)\n' +
-                '📝 <b>Create a Google Task</b> — write "create me a task for ..."'
+            selectionInput: {
+              name: 'admin_job',
+              type: 'DROPDOWN',
+              label: 'Which message?',
+              items: jobs.map(j => ({ text: j.label, value: j.value, selected: j.value === selectedJob })),
+              onChangeAction: buttonAction('admin_select_job').action
+            }
+          },
+          { textParagraph: { text: `<i><font color="#80868B">${previewText}</font></i>` } },
+          {
+            textInput: {
+              label: '🔑 Security key',
+              type: 'SINGLE_LINE',
+              name: 'admin_key'
+            }
+          },
+          {
+            buttonList: {
+              buttons: [{ text: '🚀 Send to everyone', onClick: buttonAction('admin_send_job') }]
             }
           }
         ]
       },
       {
-        header: '🧠 Kitten Brain (your private memory)',
+        header: '📢 Custom broadcast — send to EVERYONE',
         widgets: [
           {
-            textParagraph: {
-              text:
-                `Status: ${hasBrain ? '✅ created' : '❌ not created yet — menu → Create Kitten Brain'}\n` +
-                '• <b>remember ...</b> — I store it, visible only to you\n' +
-                '• <b>forget ...</b> — I show you where to delete it'
+            textInput: {
+              label: 'Your message',
+              type: 'MULTIPLE_LINE',
+              name: 'admin_custom_msg'
+            }
+          },
+          {
+            textInput: {
+              label: '🔑 Security key',
+              type: 'SINGLE_LINE',
+              name: 'admin_key2'
+            }
+          },
+          {
+            buttonList: {
+              buttons: [{ text: '📢 Send broadcast to everyone', onClick: buttonAction('admin_send_custom') }]
             }
           }
         ]
       },
       {
-        header: '⏰ Reminders & tasks — your current setup',
+        header: '🧪 Testing area — send to ONE person only',
         widgets: [
           {
-            textParagraph: {
-              text:
-                `🔔 Reminders (master switch): ${on(settings.reminders_enabled)}\n` +
-                `⏰ Daily "tasks due today" DM (${String(settings.digest_hour ?? 8).padStart(2, '0')}:00 Berlin): ${on(settings.daily_tasks)}\n` +
-                `📝 "create me a task ..." via chat: ${on(settings.task_create)}\n\n` +
-                `Change these: menu → ⏰ Reminder settings${hasBrain ? '' : ' (needs a Kitten Brain first)'}`
+            textInput: {
+              label: 'Tester email',
+              type: 'SINGLE_LINE',
+              name: 'admin_test_email'
+            }
+          },
+          {
+            textInput: {
+              label: '🔑 Security key',
+              type: 'SINGLE_LINE',
+              name: 'admin_test_key'
+            }
+          },
+          {
+            textInput: {
+              label: 'Test message',
+              type: 'MULTIPLE_LINE',
+              name: 'admin_test_msg'
+            }
+          },
+          {
+            buttonList: {
+              buttons: [{ text: '🧪 Send test DM', onClick: buttonAction('admin_send_test') }]
             }
           }
         ]
@@ -530,6 +711,10 @@ const addon = {
   openDialog: cardObject => ({
     action: { navigations: [{ pushCard: cardObject }] }
   }),
+  // replace the card of the CURRENTLY OPEN dialog (tab switches, previews)
+  updateDialog: cardObject => ({
+    action: { navigations: [{ updateCard: cardObject }] }
+  }),
   closeDialog: notificationText => ({
     action: {
       navigations: [{ endNavigation: { action: 'CLOSE_DIALOG' } }],
@@ -544,6 +729,9 @@ const classic = {
   newMessage: message => message,
   updateMessage: message => ({ actionResponse: { type: 'UPDATE_MESSAGE' }, ...message }),
   openDialog: cardObject => ({
+    actionResponse: { type: 'DIALOG', dialogAction: { dialog: { body: cardObject } } }
+  }),
+  updateDialog: cardObject => ({
     actionResponse: { type: 'DIALOG', dialogAction: { dialog: { body: cardObject } } }
   }),
   closeDialog: notificationText => ({
@@ -570,10 +758,12 @@ module.exports = {
   buildTicketCreatedMessage,
   buildReminderSettingsCardObject,
   buildFunctionsCardObject,
+  buildAdminCardObject,
   buildTaskDialogCardObject,
   buildTaskOfferMessage,
   answerTextFor,
   extractUrls,
   isLinkOnlyAnswer,
-  wrappers
+  wrappers,
+  KITTEN_VERSION
 };
