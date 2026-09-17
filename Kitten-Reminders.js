@@ -208,12 +208,7 @@ async function listOpenReminders(email) {
   return mine;
 }
 
-// Cancel the n-th (1-based, as shown by "my reminders") open reminder.
-// Returns the cancelled reminder or null.
-async function cancelReminder(email, n) {
-  const mine = await listOpenReminders(email);
-  const pick = mine[n - 1];
-  if (!pick) return null;
+async function markRowCancelled(email, pick) {
   const sheets = getSheetsClient();
   await sheets.spreadsheets.values.update({
     spreadsheetId: process.env.SPREADSHEET_ID,
@@ -223,6 +218,26 @@ async function cancelReminder(email, n) {
   });
   console.log(`⏰ Reminder cancelled for ${email}: row ${pick.row}`);
   return pick;
+}
+
+// Cancel the n-th (1-based, as shown by "my reminders") open reminder.
+// Returns the cancelled reminder or null.
+async function cancelReminder(email, n) {
+  const mine = await listOpenReminders(email);
+  const pick = mine[n - 1];
+  if (!pick) return null;
+  return markRowCancelled(email, pick);
+}
+
+// Cancel one open reminder by its SHEET ROW number (used by the ⏱️ My
+// reminders dialog buttons — row numbers are stable while the dialog is
+// open, list positions are not). Only cancels rows that belong to THIS
+// user and are still open. Returns the cancelled reminder or null.
+async function cancelReminderByRow(email, row) {
+  const mine = await listOpenReminders(email);
+  const pick = mine.find(r => r.row === Number(row));
+  if (!pick) return null;
+  return markRowCancelled(email, pick);
 }
 
 // ---------- delivery (cron, every minute) ----------
@@ -266,6 +281,6 @@ async function checkDueReminders() {
 }
 
 module.exports = {
-  parseReminder, addReminder, listOpenReminders, cancelReminder,
+  parseReminder, addReminder, listOpenReminders, cancelReminder, cancelReminderByRow,
   checkDueReminders, fmtBerlin, berlinParts, berlinToUtcMs
 };
