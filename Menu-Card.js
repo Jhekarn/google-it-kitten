@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.6.1';
+const KITTEN_VERSION = '2.6.2';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
@@ -573,9 +573,18 @@ function buildFunctionsCardObject(settings, hasBrain, tab = 'standard') {
 // reminders: [{ row, when, text }] — `row` is the sheet row (stable id for
 // the cancel button), `when` is the already-formatted Berlin timestamp.
 // Cancel buttons re-render this dialog via cancel_reminder_row.
-function buildMyRemindersCardObject(reminders) {
+function buildMyRemindersCardObject(reminders, hasBrain = true) {
   const widgets = [];
-  if (!reminders.length) {
+  if (!hasBrain) {
+    widgets.push({
+      textParagraph: {
+        text:
+          '🧠 Your reminders live in your <b>Kitten Brain</b> — and you don\'t have one yet.\n\n' +
+          'Close this popup and click <b>🧠 Create Kitten Brain</b> in the menu first, ' +
+          'then set a reminder, e.g.: <b>remind me in 2 hours to check the deploy</b>'
+      }
+    });
+  } else if (!reminders.length) {
     widgets.push({
       textParagraph: {
         text:
