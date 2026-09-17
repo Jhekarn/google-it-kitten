@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.6.0';
+const KITTEN_VERSION = '2.6.1';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
@@ -87,6 +87,7 @@ function menuButtons(hasBrain = false, isAdmin = false) {
     { text: '📋 My Open Jira Tickets',         functionName: 'option_6' },
     { text: hasBrain ? '🧠 Gogo Kitten Brain' : '🧠 Create Kitten Brain', functionName: 'create_brain' }, // per-user private memory
     { text: '⏰ Reminder settings',            functionName: 'open_reminder_settings', opensDialog: true },
+    { text: '⏱️ My reminders',                 functionName: 'open_my_reminders', opensDialog: true },
     { text: '❓ What can I do?',               functionName: 'show_functions', opensDialog: true }
   ];
   if (isAdmin) buttons.push({ text: '🛠️ Admin', functionName: 'open_admin', opensDialog: true });
@@ -486,12 +487,11 @@ function functionsTabContent(tab, settings, hasBrain) {
             '<b>create me a task for</b> ordering a new cable — new Google Task (popup with optional date)\n\n' +
             '<b>remember</b> I use a MacBook Pro — store a private memory (needs a Kitten Brain)\n' +
             '<b>forget</b> ... — I show you where to delete a memory\n\n' +
-            '<b>remind me in 2 hours to</b> check the deploy\n' +
-            '<b>remind me tomorrow at 9 to</b> call BEM\n' +
-            '<b>remind me on friday to</b> submit the report\n' +
-            '<b>remind me on 24.12. at 10 to</b> buy presents\n' +
-            '<b>my reminders</b> — list your open one-off reminders\n' +
-            '<b>cancel reminder 2</b> — cancel one of them\n\n' +
+            '<b>remind me in 2 hours to</b> check the deploy — one-off reminder ' +
+            '(times like "at 15:30", "tomorrow at 9", "on friday" or "on 24.12. at 10" work too)\n' +
+            '<b>my reminders</b> — list your open reminders, each with a number\n' +
+            '<b>cancel reminder</b> + the number from that list (e.g. <b>cancel reminder 1</b>) — cancel it. ' +
+            'Or use the ⏱️ <b>My reminders</b> menu button and cancel with one click.\n\n' +
             '🤖 <b>Anything else</b> — free-text questions go to my AI brain (any language)'
         }
       }]
@@ -512,6 +512,7 @@ function functionsTabContent(tab, settings, hasBrain) {
           '📋 <b>My Open Jira Tickets</b> — your open tickets, paginated\n' +
           '🧠 <b>Create / Gogo Kitten Brain</b> — your private memory\n' +
           '⏰ <b>Reminder settings</b> — configure all reminder features\n' +
+          '⏱️ <b>My reminders</b> — see & cancel your one-off reminders\n' +
           '❓ <b>What can I do?</b> — this overview\n\n' +
           '📚 Plus the <b>FAQ live search</b> field at the top of the menu.'
       }
@@ -534,6 +535,45 @@ function buildFunctionsCardObject(settings, hasBrain, tab = 'standard') {
       functionsTabContent(tab, settings, hasBrain)
     ]
   };
+}
+
+// ---------- ⏱️ "My reminders" dialog ----------
+// reminders: [{ row, when, text }] — `row` is the sheet row (stable id for
+// the cancel button), `when` is the already-formatted Berlin timestamp.
+// Cancel buttons re-render this dialog via cancel_reminder_row.
+function buildMyRemindersCardObject(reminders) {
+  const widgets = [];
+  if (!reminders.length) {
+    widgets.push({
+      textParagraph: {
+        text:
+          'You have no open reminders. 🎉\n\n' +
+          'Create one by writing me e.g.:\n<b>remind me in 2 hours to check the deploy</b>\n' +
+          '(times like "at 15:30", "tomorrow at 9" or "on friday" work too)'
+      }
+    });
+  } else {
+    widgets.push({ textParagraph: { text: 'Your open one-off reminders — cancel any of them right here:' } });
+    reminders.forEach((r, i) => {
+      widgets.push({
+        decoratedText: {
+          topLabel: `#${i + 1} · ${r.when} (Berlin)`,
+          text: r.text,
+          wrapText: true,
+          button: {
+            text: '🗑️ Cancel',
+            onClick: buttonAction('cancel_reminder_row', false, [{ key: 'row', value: String(r.row) }])
+          }
+        }
+      });
+    });
+    widgets.push({
+      textParagraph: {
+        text: '<font color="#80868B">Tip: in chat, <b>my reminders</b> shows this list and <b>cancel reminder</b> + its number cancels one.</font>'
+      }
+    });
+  }
+  return { sections: [{ header: '⏱️ My reminders', widgets }] };
 }
 
 // ---------- 🛠️ Admin dialog ----------
@@ -758,6 +798,7 @@ module.exports = {
   buildTicketCreatedMessage,
   buildReminderSettingsCardObject,
   buildFunctionsCardObject,
+  buildMyRemindersCardObject,
   buildAdminCardObject,
   buildTaskDialogCardObject,
   buildTaskOfferMessage,
