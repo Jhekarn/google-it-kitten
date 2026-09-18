@@ -268,8 +268,11 @@ const SETTING_DEFAULTS = {
   daily_tasks: false,       // "tasks due today" DM (opt-in)
   morning_brief: false,     // morning day-brief: today's meetings (opt-in)
   task_create: true,        // "create me a task ..." via chat (opt-out)
-  digest_hour: 8            // hour (Berlin time) for the daily DM
+  digest_hour: 8,           // hour (Berlin time) for the daily DM
+  meeting_start: 9,         // find-a-time search window start (Berlin hour)
+  meeting_end: 18           // find-a-time search window end (Berlin hour)
 };
+const HOUR_KEYS = ['digest_hour', 'meeting_start', 'meeting_end'];
 const settingsCache = new Map(); // email -> { ts, values }
 
 async function ensureSettingsTab(email, sheetId) {
@@ -308,9 +311,9 @@ async function getSettings(email) {
       for (const row of res.data.values || []) {
         const [k, v] = row;
         if (!k || !Object.prototype.hasOwnProperty.call(values, k)) continue;
-        if (k === 'digest_hour') {
+        if (HOUR_KEYS.includes(k)) {
           const h = parseInt(v, 10);
-          if (!Number.isNaN(h) && h >= 0 && h <= 23) values.digest_hour = h;
+          if (!Number.isNaN(h) && h >= 0 && h <= 23) values[k] = h;
         } else {
           values[k] = String(v).toUpperCase() === 'TRUE';
         }
@@ -335,7 +338,7 @@ async function setSettings(email, newValues) {
   const values = { ...SETTING_DEFAULTS, ...newValues };
   await sheets.spreadsheets.values.update({
     spreadsheetId: brain.sheetId,
-    range: `${SETTINGS_TAB}!A2:B6`,
+    range: `${SETTINGS_TAB}!A2:B8`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
       values: [
@@ -343,7 +346,9 @@ async function setSettings(email, newValues) {
         ['daily_tasks', values.daily_tasks ? 'TRUE' : 'FALSE'],
         ['morning_brief', values.morning_brief ? 'TRUE' : 'FALSE'],
         ['task_create', values.task_create ? 'TRUE' : 'FALSE'],
-        ['digest_hour', String(values.digest_hour)]
+        ['digest_hour', String(values.digest_hour)],
+        ['meeting_start', String(values.meeting_start)],
+        ['meeting_end', String(values.meeting_end)]
       ]
     }
   });
