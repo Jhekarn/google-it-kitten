@@ -52,12 +52,14 @@ const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, isAdmin } = require('./Kitten-Brain');
 const { createTask, runDailyTaskDigest, berlinHour } = require('./Kitten-Tasks');
 const { parseReminder, addReminder, listOpenReminders, cancelReminder, cancelReminderByRow, checkDueReminders, fmtBerlin, berlinParts, berlinToUtcMs } = require('./Kitten-Reminders');
-const { createEvent, findFreeSlots, parseGuests } = require('./Kitten-Meetings');
+const { createEvent, findFreeSlots, findFreeSlotsWeek, parseGuests } = require('./Kitten-Meetings');
 
 // "10:15" in Berlin time — for meeting slot labels
 const berlinHHMM = ms => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(ms));
 // "Thu 24/09/2026" in Berlin time
 const berlinDay = ms => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(ms)).replace(',', '');
+// "Thu 24/09" in Berlin time — short, for week-scan slot buttons
+const berlinDayShort = ms => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', weekday: 'short', day: '2-digit', month: '2-digit' }).format(new Date(ms)).replace(',', '');
 
 // ---- Prepared announcement DMs (used by /jobs AND the 🛠️ Admin dialog) ----
 const ANNOUNCEMENTS = {
@@ -863,33 +865,56 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             }
           }
 
-          // 🔎 find free meeting times (free/busy of all guests)
+          // 🔎 find free meeting times (free/busy of all guests) —
+          // range 'day' = up to 3 slots on that day (default);
+          // range 'week' = Mon–Fri of the week containing the picked date,
+          // best slot per day (past days skipped), one freebusy call.
           case 'findtime_submit': {
             const dateMs = Number(ev.formInputs?.find_date?.dateInput?.msSinceEpoch);
             const durationMin = parseInt(ev.formInputs?.find_duration?.stringInputs?.value?.[0], 10) || 60;
             const guests = parseGuests(ev.formInputs?.find_guests?.stringInputs?.value?.[0]);
+            const range = ev.formInputs?.find_range?.stringInputs?.value?.[0] === 'week' ? 'week' : 'day';
             if (!dateMs || Number.isNaN(dateMs)) return res.json(w.closeDialog('⚠️ Please pick a day to search.'));
             const day = new Date(dateMs);
             const y = day.getUTCFullYear(), mo = day.getUTCMonth() + 1, d = day.getUTCDate();
             const settings = await getSettings(ev.user?.email).catch(() => ({ meeting_start: 9, meeting_end: 18 }));
+            const winFrom = String(settings.meeting_start ?? 9).padStart(2, '0');
+            const winTo = String(settings.meeting_end ?? 18).padStart(2, '0');
             try {
-              const { slots, unreadable } = await findFreeSlots(ev.user?.email, {
+              const args = {
                 y, m: mo, d, durationMin, guests,
                 windowStartH: settings.meeting_start ?? 9,
-                windowEndH: settings.meeting_end ?? 18,
-                maxSlots: 3
-              });
-              const dayLabel = berlinDay(slots[0] ?? dateMs);
-              let header = `🔎 <b>${durationMin}-minute meeting on ${dayLabel}</b> — you + ${guests.length} guest${guests.length === 1 ? '' : 's'}:\n`;
+                windowEndH: settings.meeting_end ?? 18
+              };
+              const result = range === 'week'
+                ? await findFreeSlotsWeek(ev.user?.email, { ...args, maxSlots: 5 })
+                : await findFreeSlots(ev.user?.email, { ...args, maxSlots: 3 });
+              const { slots, unreadable } = result;
+
+              let header;
+              if (range === 'week') {
+                const ws = result.weekStart, we = result.weekEnd;
+                const wsMs = Date.UTC(ws.y, ws.m - 1, ws.d, 12), weMs = Date.UTC(we.y, we.m - 1, we.d, 12);
+                header = `🔎 <b>${durationMin}-minute meeting in the week ${berlinDayShort(wsMs)} – ${berlinDayShort(weMs)}</b> — you + ${guests.length} guest${guests.length === 1 ? '' : 's'}:\n`;
+              } else {
+                header = `🔎 <b>${durationMin}-minute meeting on ${berlinDay(slots[0] ?? dateMs)}</b> — you + ${guests.length} guest${guests.length === 1 ? '' : 's'}:\n`;
+              }
               if (unreadable.length) {
                 header += `\n⚠️ I can't read the calendar${unreadable.length > 1 ? 's' : ''} of <b>${unreadable.join(', ')}</b> (external or restricted) — the times below fit everyone else.\n`;
               }
               if (!slots.length) {
-                header += `\n😿 No slot where everyone is free between ${String(settings.meeting_start ?? 9).padStart(2, '0')}:00 and ${String(settings.meeting_end ?? 18).padStart(2, '0')}:00. Try another day, a shorter meeting, or widen your window under ⚙️ Settings → 📅 Meeting Settings.`;
+                header += `\n😿 No slot where everyone is free between ${winFrom}:00 and ${winTo}:00${range === 'week' ? ' on any day of that week' : ''}. Try another ${range === 'week' ? 'week' : 'day'}, a shorter meeting, or widen your window under ⚙️ Settings → 📅 Meeting Settings.`;
+              } else if (range === 'week') {
+                header += `\n✅ Best time${slots.length > 1 ? 's' : ''} per day where everyone${unreadable.length ? ' (readable)' : ''} is free:`;
               } else {
                 header += `\n✅ Everyone${unreadable.length ? ' (readable)' : ''} is free at:`;
               }
-              const slotItems = slots.map(s => ({ startMs: s, label: `${berlinHHMM(s)} – ${berlinHHMM(s + durationMin * 60000)}` }));
+              const slotItems = slots.map(s => ({
+                startMs: s,
+                label: range === 'week'
+                  ? `${berlinDayShort(s)} · ${berlinHHMM(s)} – ${berlinHHMM(s + durationMin * 60000)}`
+                  : `${berlinHHMM(s)} – ${berlinHHMM(s + durationMin * 60000)}`
+              }));
               return res.json(w.newMessage(buildFindTimeResultsMessage(header, slotItems, durationMin, guests.join(', '))));
             } catch (err) {
               console.error('❌ Find-a-time failed:', err.response?.data?.error?.message || err.message);
