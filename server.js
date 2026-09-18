@@ -905,7 +905,8 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               if (!slots.length) {
                 header += `\n😿 No slot where everyone is free between ${winFrom}:00 and ${winTo}:00${range === 'week' ? ' on any day of that week' : ''}. Try another ${range === 'week' ? 'week' : 'day'}, a shorter meeting, or widen your window under ⚙️ Settings → 📅 Meeting Settings.`;
               } else if (range === 'week') {
-                header += `\n✅ Best time${slots.length > 1 ? 's' : ''} per day where everyone${unreadable.length ? ' (readable)' : ''} is free:`;
+                header += `\n✅ <b>One suggestion per day</b> — the earliest slot where everyone${unreadable.length ? ' (readable)' : ''} is free:`;
+                header += `\n<font color="#80868B">ℹ️ Days without a button have no common free slot. Need more options on one of these days? Run the search again with 📅 "Only this day".</font>`;
               } else {
                 header += `\n✅ Everyone${unreadable.length ? ' (readable)' : ''} is free at:`;
               }
