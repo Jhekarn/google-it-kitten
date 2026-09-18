@@ -27,12 +27,15 @@ const {
   buildFaqDialogCardObject,
   buildJiraDialogCardObject,
   buildTicketCreatedMessage,
-  buildReminderSettingsCardObject,
+  buildSettingsCardObject,
   buildFunctionsCardObject,
   buildMyRemindersCardObject,
   buildAdminCardObject,
   buildTaskDialogCardObject,
   buildTaskOfferMessage,
+  buildMeetingPlannerCardObject,
+  buildMeetingHubMessage,
+  buildFindTimeResultsMessage,
   answerTextFor,
   extractUrls,
   isLinkOnlyAnswer,
@@ -49,6 +52,12 @@ const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, isAdmin } = require('./Kitten-Brain');
 const { createTask, runDailyTaskDigest, berlinHour } = require('./Kitten-Tasks');
 const { parseReminder, addReminder, listOpenReminders, cancelReminder, cancelReminderByRow, checkDueReminders, fmtBerlin } = require('./Kitten-Reminders');
+const { createEvent, findFreeSlots, parseGuests } = require('./Kitten-Meetings');
+
+// "10:15" in Berlin time — for meeting slot labels
+const berlinHHMM = ms => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(ms));
+// "Thu 24/09/2026" in Berlin time
+const berlinDay = ms => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(ms)).replace(',', '');
 
 // ---- Prepared announcement DMs (used by /jobs AND the 🛠️ Admin dialog) ----
 const ANNOUNCEMENTS = {
@@ -78,7 +87,7 @@ const ANNOUNCEMENTS = {
       `📝 *Create tasks by chat* — just write me something like "create me a task for ordering a new cable" ` +
       `and I'll put it straight into your Google Tasks, with an optional target date. ` +
       `(Don't worry — I only create tasks, I never delete or complete them.)\n\n` +
-      `*How to switch it on:* type *kitten* → *⏰ Reminder settings* → enable ` +
+      `*How to switch it on:* type *kitten* → *⚙️ Settings* → enable ` +
       `"Remind me of my tasks due today" and pick your time. ` +
       `(If you don't have a 🧠 Kitten Brain yet, create that first — the settings live in there.) 🐾`
   }
@@ -454,6 +463,13 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           }));
         }
 
+        // 📅 "create a meeting" / "find a time" → offer the meeting planner
+        // (dialogs can only open from a button click).
+        if (/^(?:create|plan|schedule)\s+(?:me\s+)?(?:a\s+|an\s+)?(?:meeting|event|call|termin)\b/i.test(rawText) ||
+            /^find\s+(?:a\s+|me\s+a\s+)?(?:time|slot|meeting\s+time)\b/i.test(rawText)) {
+          return res.json(w.newMessage(buildMeetingHubMessage()));
+        }
+
         // 📝 "create me a task ..." → offer the task dialog (dialogs can only
         // open from a button click, so the reply carries a prefilled button).
         const taskMatch = rawText.match(/^create\s+(?:me\s+)?(?:a\s+)?task\b[:\s]*(?:for\s+)?(.*)$/i);
@@ -461,7 +477,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           const settings = await getSettings(ev.user?.email).catch(() => null);
           if (settings && !settings.task_create) {
             return res.json(w.newMessage({
-              text: '📝 Task creation is switched OFF in your settings. Type *kitten* → ⏰ Reminder settings to turn it back on.'
+              text: '📝 Task creation is switched OFF in your settings. Type *kitten* → ⚙️ Settings to turn it back on.'
             }));
           }
           return res.json(w.newMessage(buildTaskOfferMessage((taskMatch[1] || '').trim())));
@@ -584,14 +600,47 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             }
           }
 
-          // ⏰ Reminder settings dialog (stored in the user's Kitten Brain)
+          // ⚙️ Settings dialog (Reminder + Meeting Settings, stored in the
+          // user's Kitten Brain). 'open_reminder_settings' kept for old menu
+          // cards that are still in users' chat histories.
+          case 'open_settings':
           case 'open_reminder_settings': {
             if (!hasBrain) {
               return res.json(w.updateMessage(buildHelpMessage(
-                '⏰ Reminder settings live in your Kitten Brain — please click *🧠 Create Kitten Brain* first, then open the settings again.', [], hasBrain, adminUser)));
+                '⚙️ Your settings live in your Kitten Brain — please click *🧠 Create Kitten Brain* first, then open the settings again.', [], hasBrain, adminUser)));
             }
             const settings = await getSettings(ev.user?.email);
-            return res.json(w.openDialog(buildReminderSettingsCardObject(settings)));
+            return res.json(w.openDialog(buildSettingsCardObject(settings, 'reminders')));
+          }
+
+          // settings side-nav switch (Reminder Settings <-> Meeting Settings)
+          case 'settings_tab': {
+            const settings = await getSettings(ev.user?.email).catch(() => ({}));
+            const tab = ['reminders', 'meetings'].includes(ev.params?.tab) ? ev.params.tab : 'reminders';
+            return res.json(w.updateDialog(buildSettingsCardObject(settings, tab)));
+          }
+
+          // 📅 Meeting Settings save (search window for find-a-time)
+          case 'meeting_settings_submit': {
+            const startRaw = parseInt(ev.formInputs?.meeting_start?.stringInputs?.value?.[0], 10);
+            const endRaw = parseInt(ev.formInputs?.meeting_end?.stringInputs?.value?.[0], 10);
+            const mStart = (!Number.isNaN(startRaw) && startRaw >= 0 && startRaw <= 23) ? startRaw : 9;
+            const mEnd = (!Number.isNaN(endRaw) && endRaw >= 0 && endRaw <= 23) ? endRaw : 18;
+            if (mEnd <= mStart) {
+              return res.json(w.closeDialog('⚠️ "Search until" must be later than "Search from" — nothing was saved. Please try again.'));
+            }
+            // merge with CURRENT settings so the reminder toggles are untouched
+            const cur = await getSettings(ev.user?.email).catch(() => null);
+            const result = await setSettings(ev.user?.email, { ...(cur || {}), meeting_start: mStart, meeting_end: mEnd })
+              .catch(err => { console.error('❌ meeting settings save failed:', err.message); return 'error'; });
+            if (result === 'no_brain') {
+              return res.json(w.closeDialog('⚠️ You need a Kitten Brain first — click 🧠 Create Kitten Brain in the menu.'));
+            }
+            if (result === 'error') {
+              return res.json(w.closeDialog('😿 Could not save your settings. Please try again.'));
+            }
+            return res.json(w.closeDialog(
+              `✅ Meeting settings saved — I'll search for free times between ${String(mStart).padStart(2, '0')}:00 and ${String(mEnd).padStart(2, '0')}:00 (Berlin time).`));
           }
 
           // ⏱️ My reminders dialog: list all open one-off reminders with a
@@ -619,8 +668,10 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             const newHour = (!Number.isNaN(hourRaw) && hourRaw >= 0 && hourRaw <= 23) ? hourRaw : 8;
             // settings BEFORE saving — to detect the FIRST time the daily
             // task reminder is switched on (then we mention the reminder time)
+            // and to keep the Meeting Settings untouched (merge, don't reset)
             const before = await getSettings(ev.user?.email).catch(() => null);
             const result = await setSettings(ev.user?.email, {
+              ...(before || {}),
               reminders_enabled: picked.includes('reminders_enabled'),
               daily_tasks: picked.includes('daily_tasks'),
               morning_brief: picked.includes('morning_brief'),
@@ -641,7 +692,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             if (firstEnable) {
               return res.json(w.closeDialog(
                 `✅ Saved! ⏰ Your daily reminder time is currently set to ${String(newHour).padStart(2, '0')}:00 Berlin time — ` +
-                'you can change it any time: type *kitten* → ⏰ Reminder settings.'));
+                'you can change it any time: type *kitten* → ⚙️ Settings.'));
             }
             return res.json(w.closeDialog('✅ Reminder settings saved — stored in the SETTINGS tab of your Kitten Brain sheet.'));
           }
@@ -731,6 +782,102 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             } catch (err) {
               console.error('❌ Admin test DM failed:', err.message);
               return res.json(w.closeDialog(`❌ Test DM failed: ${err.message}`));
+            }
+          }
+
+          // 📅 Meeting planner dialog (Create event / Find a time) —
+          // slot buttons reopen it with startMs/duration/guests prefilled
+          case 'open_meeting_planner': {
+            const settings = await getSettings(ev.user?.email).catch(() => ({ meeting_start: 9, meeting_end: 18 }));
+            const tab = ['create', 'find'].includes(ev.params?.tab) ? ev.params.tab : 'create';
+            const prefill = {
+              startMs: ev.params?.startMs ? Number(ev.params.startMs) : undefined,
+              duration: ev.params?.duration ? Number(ev.params.duration) : undefined,
+              guests: ev.params?.guests || ''
+            };
+            return res.json(w.openDialog(buildMeetingPlannerCardObject(settings, tab, prefill)));
+          }
+
+          case 'meeting_planner_tab': {
+            const settings = await getSettings(ev.user?.email).catch(() => ({ meeting_start: 9, meeting_end: 18 }));
+            const tab = ['create', 'find'].includes(ev.params?.tab) ? ev.params.tab : 'create';
+            return res.json(w.updateDialog(buildMeetingPlannerCardObject(settings, tab)));
+          }
+
+          // 📅 create the calendar event (user's own calendar, auto Meet link)
+          case 'event_create_submit': {
+            const title = (ev.formInputs?.event_title?.stringInputs?.value?.[0] || '').trim();
+            const startMs = Number(ev.formInputs?.event_start?.dateTimeInput?.msSinceEpoch);
+            const durationMin = parseInt(ev.formInputs?.event_duration?.stringInputs?.value?.[0], 10) || 60;
+            const guests = parseGuests(ev.formInputs?.event_guests?.stringInputs?.value?.[0]);
+            const description = (ev.formInputs?.event_desc?.stringInputs?.value?.[0] || '').trim();
+            if (!title) return res.json(w.closeDialog('⚠️ Please give the event a title — nothing was created.'));
+            if (!startMs || Number.isNaN(startMs)) return res.json(w.closeDialog('⚠️ Please pick a start date & time — nothing was created.'));
+            if (startMs < Date.now()) return res.json(w.closeDialog('⚠️ The start time is in the past — nothing was created. Please try again.'));
+            try {
+              const evt = await createEvent(ev.user?.email, { title, startMs, durationMin, guests, description });
+              const buttons = [];
+              if (evt.htmlLink) buttons.push({ text: '📅 Open in Calendar', onClick: { openLink: { url: evt.htmlLink } } });
+              if (evt.meetLink) buttons.push({ text: '🎥 Join Google Meet', onClick: { openLink: { url: evt.meetLink } } });
+              return res.json(w.newMessage({
+                text: '📅 Event created',
+                cardsV2: [{
+                  cardId: 'event_created',
+                  card: {
+                    sections: [{
+                      widgets: [
+                        {
+                          textParagraph: {
+                            text:
+                              `📅 <b>${title}</b> is in your calendar!\n` +
+                              `${berlinDay(startMs)}, ${berlinHHMM(startMs)} – ${berlinHHMM(evt.endMs)} (Berlin)` +
+                              `${guests.length ? `\n✉️ Invitations sent to ${guests.length} guest${guests.length > 1 ? 's' : ''}.` : ''}` +
+                              `${evt.meetLink ? '\n🎥 Google Meet link attached.' : ''}`
+                          }
+                        },
+                        ...(buttons.length ? [{ buttonList: { buttons } }] : [])
+                      ]
+                    }]
+                  }
+                }]
+              }));
+            } catch (err) {
+              console.error('❌ Event creation failed:', err.response?.data?.error?.message || err.message);
+              return res.json(w.closeDialog('😿 I couldn\'t create the event. Please tell Marcus Gallein (IT) — the Calendar write access may not be set up yet.'));
+            }
+          }
+
+          // 🔎 find free meeting times (free/busy of all guests)
+          case 'findtime_submit': {
+            const dateMs = Number(ev.formInputs?.find_date?.dateInput?.msSinceEpoch);
+            const durationMin = parseInt(ev.formInputs?.find_duration?.stringInputs?.value?.[0], 10) || 60;
+            const guests = parseGuests(ev.formInputs?.find_guests?.stringInputs?.value?.[0]);
+            if (!dateMs || Number.isNaN(dateMs)) return res.json(w.closeDialog('⚠️ Please pick a day to search.'));
+            const day = new Date(dateMs);
+            const y = day.getUTCFullYear(), mo = day.getUTCMonth() + 1, d = day.getUTCDate();
+            const settings = await getSettings(ev.user?.email).catch(() => ({ meeting_start: 9, meeting_end: 18 }));
+            try {
+              const { slots, unreadable } = await findFreeSlots(ev.user?.email, {
+                y, m: mo, d, durationMin, guests,
+                windowStartH: settings.meeting_start ?? 9,
+                windowEndH: settings.meeting_end ?? 18,
+                maxSlots: 3
+              });
+              const dayLabel = berlinDay(slots[0] ?? dateMs);
+              let header = `🔎 <b>${durationMin}-minute meeting on ${dayLabel}</b> — you + ${guests.length} guest${guests.length === 1 ? '' : 's'}:\n`;
+              if (unreadable.length) {
+                header += `\n⚠️ I can't read the calendar${unreadable.length > 1 ? 's' : ''} of <b>${unreadable.join(', ')}</b> (external or restricted) — the times below fit everyone else.\n`;
+              }
+              if (!slots.length) {
+                header += `\n😿 No slot where everyone is free between ${String(settings.meeting_start ?? 9).padStart(2, '0')}:00 and ${String(settings.meeting_end ?? 18).padStart(2, '0')}:00. Try another day, a shorter meeting, or widen your window under ⚙️ Settings → 📅 Meeting Settings.`;
+              } else {
+                header += `\n✅ Everyone${unreadable.length ? ' (readable)' : ''} is free at:`;
+              }
+              const slotItems = slots.map(s => ({ startMs: s, label: `${berlinHHMM(s)} – ${berlinHHMM(s + durationMin * 60000)}` }));
+              return res.json(w.newMessage(buildFindTimeResultsMessage(header, slotItems, durationMin, guests.join(', '))));
+            } catch (err) {
+              console.error('❌ Find-a-time failed:', err.response?.data?.error?.message || err.message);
+              return res.json(w.closeDialog('😿 I couldn\'t check the calendars. Please tell Marcus Gallein (IT) — the Calendar access may not be set up yet.'));
             }
           }
 
