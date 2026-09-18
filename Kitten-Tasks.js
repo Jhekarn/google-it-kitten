@@ -139,7 +139,7 @@ async function runDailyTaskDigest(onlyEmail, hour = null) {
         text += `\n\n📝 *Tasks:* nothing due today ✅`;
       }
 
-      text += `\n\n_You can change this any time: type *kitten* → ⏰ Reminder settings._ 🐾`;
+      text += `\n\n_You can change this any time: type *kitten* → ⚙️ Settings._ 🐾`;
 
       (await sendDm(email, text)) ? sent++ : failed++;
     } catch (err) {
