@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.7.1';
+const KITTEN_VERSION = '2.8.0';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
@@ -87,9 +87,9 @@ function menuButtons(hasBrain = false, isAdmin = false) {
     { text: '📋 My Open Jira Tickets',         functionName: 'option_6' },
     { text: '📅 Plan a meeting',               functionName: 'open_meeting_planner', opensDialog: true },
     { text: hasBrain ? '🧠 Gogo Kitten Brain' : '🧠 Create Kitten Brain', functionName: 'create_brain' }, // per-user private memory
-    { text: '⚙️ Settings',                     functionName: 'open_settings', opensDialog: true },
     { text: '⏱️ My reminders',                 functionName: 'open_my_reminders', opensDialog: true },
-    { text: '❓ What can I do?',               functionName: 'show_functions', opensDialog: true }
+    { text: '❓ What can I do?',               functionName: 'show_functions', opensDialog: true },
+    { text: '⚙️ Settings',                     functionName: 'open_settings', opensDialog: true }
   ];
   if (isAdmin) buttons.push({ text: '🛠️ Admin', functionName: 'open_admin', opensDialog: true });
   return buttons;
@@ -509,8 +509,8 @@ function buildSettingsCardObject(settings, tab = 'reminders') {
 
 // ---------- 📅 "Plan a meeting" dialog (side navigation) ----------
 // Two pages: Create event (title, start, duration, guests, description) and
-// Find a time (date, duration, guests → free-slot suggestions). A Google
-// Meet link is attached automatically; guests get normal Google invitations.
+// Find a time (range day/week, date, duration, guests → free-slot suggestions).
+// A Google Meet link is attached automatically; guests get normal invitations.
 const MEETING_TABS = [
   { id: 'create', label: '📅 Create event' },
   { id: 'find',   label: '🔎 Find a time' }
@@ -528,14 +528,26 @@ function meetingTabContent(tab, settings, prefill = {}) {
       {
         textParagraph: {
           text:
-            'Pick a day, duration and guests — I check everyone\'s <b>free/busy status</b> ' +
-            '(never event details) and suggest times where all are free. Calendars I can\'t ' +
-            'read (e.g. external guests) are reported and skipped.'
+            'Pick a day (or a whole week), duration and guests — I check everyone\'s ' +
+            '<b>free/busy status</b> (never event details) and suggest times where all are free. ' +
+            'For a whole week I suggest the <b>best slot of each day</b>, Mon–Fri. ' +
+            'Calendars I can\'t read (e.g. external guests) are reported and skipped.'
+        }
+      },
+      {
+        selectionInput: {
+          name: 'find_range',
+          type: 'DROPDOWN',
+          label: 'Search range',
+          items: [
+            { text: '📅 Only this day', value: 'day', selected: true },
+            { text: '🗓️ Whole work week (Mon–Fri)', value: 'week' }
+          ]
         }
       },
       {
         dateTimePicker: {
-          label: 'Day to search',
+          label: 'Day to search (for a whole week: any day of that week)',
           name: 'find_date',
           type: 'DATE_ONLY'
         }
@@ -770,7 +782,7 @@ function functionsTabContent(tab, settings, hasBrain) {
             '⏱️ One-off reminders — "remind me in 2 hours to ..." (see Chat commands)\n' +
             '📝 Create Google Tasks by chat — I never delete or complete tasks\n' +
             '📅 Create calendar events (auto Google Meet link, invitations to all guests)\n' +
-            '🔎 Find a meeting time — I check the free/busy status of all guests and suggest slots where everyone is free (unreadable calendars, e.g. externals, are reported and skipped)\n\n' +
+            '🔎 Find a meeting time — one day (3 suggestions) or the whole work week Mon–Fri (best slot per day): I check the free/busy status of all guests and suggest slots where everyone is free (unreadable calendars, e.g. externals, are reported and skipped)\n\n' +
             '<b>Your current setup:</b>\n' +
             `🔔 Reminders (master switch): ${on(settings.reminders_enabled)}\n` +
             `⏰ Daily tasks DM (${hour}:00 Berlin): ${on(settings.daily_tasks)}\n` +
@@ -817,11 +829,11 @@ function functionsTabContent(tab, settings, hasBrain) {
           '📄 <b>Submit a New FAQ</b> — add knowledge to the FAQ database\n' +
           '📶 <b>WiFi password</b> — office & guest WiFi\n' +
           '📋 <b>My Open Jira Tickets</b> — your open tickets, paginated\n' +
-          '📅 <b>Plan a meeting</b> — create calendar events (auto Meet link) or find a time when all guests are free\n' +
+          '📅 <b>Plan a meeting</b> — create calendar events (auto Meet link) or find a time when all guests are free (one day or the whole week)\n' +
           '🧠 <b>Create / Gogo Kitten Brain</b> — your private memory\n' +
-          '⚙️ <b>Settings</b> — Reminder Settings & Meeting Settings\n' +
           '⏱️ <b>My reminders</b> — see & cancel your one-off reminders\n' +
-          '❓ <b>What can I do?</b> — this overview\n\n' +
+          '❓ <b>What can I do?</b> — this overview\n' +
+          '⚙️ <b>Settings</b> — Reminder Settings & Meeting Settings\n\n' +
           '📚 Plus the <b>FAQ live search</b> field at the top of the menu.'
       }
     }]
