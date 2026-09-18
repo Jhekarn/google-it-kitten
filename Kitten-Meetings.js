@@ -12,16 +12,20 @@
 //
 // The Kitten only ever CREATES events — it never edits or deletes any.
 //
-// Access: domain-wide delegation impersonating THE USER with scope
-//   https://www.googleapis.com/auth/calendar.events (create + read events)
-//   (free/busy uses the same impersonated client; org-internal calendars
-//   share free/busy by Workspace default).
-// Setup: Google Calendar API enabled + the scope added to the DWD client ID.
+// Access: domain-wide delegation impersonating THE USER with two scopes:
+//   https://www.googleapis.com/auth/calendar.events   -> creating events
+//   https://www.googleapis.com/auth/calendar.readonly -> free/busy lookups
+//   (Google's freebusy endpoint is NOT covered by calendar.events, so
+//   find-a-time uses a separate readonly client. calendar.readonly is the
+//   same scope the morning day-brief already uses. Org-internal calendars
+//   share free/busy by Workspace default.)
+// Setup: Google Calendar API enabled + both scopes on the DWD client ID.
 
 const { google } = require('googleapis');
 const { berlinParts, berlinToUtcMs } = require('./Kitten-Reminders');
 
 const userClients = new Map(); // email -> calendar client (events scope)
+const fbClients = new Map();   // email -> calendar client (readonly scope, free/busy)
 
 function getUserEventsClient(email) {
   if (userClients.has(email)) return userClients.get(email);
@@ -33,6 +37,20 @@ function getUserEventsClient(email) {
   });
   const c = google.calendar({ version: 'v3', auth });
   userClients.set(email, c);
+  return c;
+}
+
+// free/busy requires calendar.readonly (calendar.events does not cover it)
+function getUserFreeBusyClient(email) {
+  if (fbClients.has(email)) return fbClients.get(email);
+  const auth = new google.auth.JWT({
+    email: process.env.GOOGLE_CLIENT_EMAIL,
+    key: (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+    scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
+    subject: email
+  });
+  const c = google.calendar({ version: 'v3', auth });
+  fbClients.set(email, c);
   return c;
 }
 
@@ -80,7 +98,7 @@ async function createEvent(email, { title, startMs, durationMin, guests = [], de
 // user's Meeting Settings (default 9–18).
 // Returns { slots: [startMs], readable: [emails], unreadable: [emails] }.
 async function findFreeSlots(email, { y, m, d, durationMin, guests = [], windowStartH = 9, windowEndH = 18, maxSlots = 3 }) {
-  const cal = getUserEventsClient(email);
+  const cal = getUserFreeBusyClient(email);
   const people = [...new Set([email.toLowerCase(), ...guests])];
   const winStart = berlinToUtcMs(y, m, d, windowStartH, 0);
   const winEnd = berlinToUtcMs(y, m, d, windowEndH, 0);
