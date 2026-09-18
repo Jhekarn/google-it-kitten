@@ -51,7 +51,7 @@ const { postOps, postToSpace: postToSpaceViaPoster, sendDm, getUserInfo, listDom
 const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, isAdmin } = require('./Kitten-Brain');
 const { createTask, runDailyTaskDigest, berlinHour } = require('./Kitten-Tasks');
-const { parseReminder, addReminder, listOpenReminders, cancelReminder, cancelReminderByRow, checkDueReminders, fmtBerlin } = require('./Kitten-Reminders');
+const { parseReminder, addReminder, listOpenReminders, cancelReminder, cancelReminderByRow, checkDueReminders, fmtBerlin, berlinParts, berlinToUtcMs } = require('./Kitten-Reminders');
 const { createEvent, findFreeSlots, parseGuests } = require('./Kitten-Meetings');
 
 // "10:15" in Berlin time — for meeting slot labels
@@ -152,7 +152,7 @@ cron.schedule('0 * * * *', async () => {
 }, { timezone: 'Europe/Berlin' });
 
 // EVERY MINUTE: deliver due one-off reminders ("remind me in 2 hours ...").
-// A single central index read per tick; quiet unless something was sent.
+// A single central sheet read per tick; quiet unless something was sent.
 let reminderFailStreak = 0;
 cron.schedule('* * * * *', async () => {
   try {
@@ -790,8 +790,16 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'open_meeting_planner': {
             const settings = await getSettings(ev.user?.email).catch(() => ({ meeting_start: 9, meeting_end: 18 }));
             const tab = ['create', 'find'].includes(ev.params?.tab) ? ev.params.tab : 'create';
+            // The Chat date/time picker displays its value as if the ms were
+            // UTC wall clock — so a TRUE epoch (slot buttons) must be turned
+            // into "Berlin wall clock encoded as UTC" for the prefill.
+            let pickerMs;
+            if (ev.params?.startMs) {
+              const bp = berlinParts(Number(ev.params.startMs));
+              pickerMs = Date.UTC(bp.y, bp.m - 1, bp.d, bp.hh, bp.mm);
+            }
             const prefill = {
-              startMs: ev.params?.startMs ? Number(ev.params.startMs) : undefined,
+              startMs: pickerMs,
               duration: ev.params?.duration ? Number(ev.params.duration) : undefined,
               guests: ev.params?.guests || ''
             };
@@ -807,7 +815,15 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           // 📅 create the calendar event (user's own calendar, auto Meet link)
           case 'event_create_submit': {
             const title = (ev.formInputs?.event_title?.stringInputs?.value?.[0] || '').trim();
-            const startMs = Number(ev.formInputs?.event_start?.dateTimeInput?.msSinceEpoch);
+            // The picker's msSinceEpoch is the picked WALL-CLOCK time encoded
+            // as if it were UTC (NOT a true epoch). Reinterpret it as Berlin
+            // wall clock -> true epoch, otherwise events land 1-2 h late.
+            const rawStart = Number(ev.formInputs?.event_start?.dateTimeInput?.msSinceEpoch);
+            let startMs = NaN;
+            if (rawStart && !Number.isNaN(rawStart)) {
+              const p = new Date(rawStart);
+              startMs = berlinToUtcMs(p.getUTCFullYear(), p.getUTCMonth() + 1, p.getUTCDate(), p.getUTCHours(), p.getUTCMinutes());
+            }
             const durationMin = parseInt(ev.formInputs?.event_duration?.stringInputs?.value?.[0], 10) || 60;
             const guests = parseGuests(ev.formInputs?.event_guests?.stringInputs?.value?.[0]);
             const description = (ev.formInputs?.event_desc?.stringInputs?.value?.[0] || '').trim();
@@ -1052,6 +1068,12 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
     console.error('🚨 Error handling Chat event:', err);
     return res.json(w.newMessage({ text: '❌ Something went wrong. Please tell Marcus Gallein.' }));
   }
+});
+
+// ---- Start ----
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`⚡️ google-it-kitten foundation is listening on port ${PORT}`);
 });
 
 // ---- Start ----
