@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.6.2';
+const KITTEN_VERSION = '2.7.0';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
@@ -85,8 +85,9 @@ function menuButtons(hasBrain = false, isAdmin = false) {
     { text: '📄 Submit a New FAQ',             functionName: 'trigger_faq_modal', opensDialog: true }, // option_4
     { text: '📶 What is the wifi password?',   functionName: 'option_5' },
     { text: '📋 My Open Jira Tickets',         functionName: 'option_6' },
+    { text: '📅 Plan a meeting',               functionName: 'open_meeting_planner', opensDialog: true },
     { text: hasBrain ? '🧠 Gogo Kitten Brain' : '🧠 Create Kitten Brain', functionName: 'create_brain' }, // per-user private memory
-    { text: '⏰ Reminder settings',            functionName: 'open_reminder_settings', opensDialog: true },
+    { text: '⚙️ Settings',                     functionName: 'open_settings', opensDialog: true },
     { text: '⏱️ My reminders',                 functionName: 'open_my_reminders', opensDialog: true },
     { text: '❓ What can I do?',               functionName: 'show_functions', opensDialog: true }
   ];
@@ -376,51 +377,351 @@ function buildFaqDialogCardObject() {
   };
 }
 
-// ---------- ⏰ Reminder settings dialog ----------
-// Toggles are stored in the SETTINGS tab of the user's own Kitten Brain sheet.
-function buildReminderSettingsCardObject(settings) {
+// ---------- ⚙️ Settings dialog (side navigation) ----------
+// Two settings pages, stored in the SETTINGS tab of the user's own Kitten
+// Brain sheet: ⏰ Reminder Settings and 📅 Meeting Settings. Same side-nav
+// pattern as the "What can I do?" dialog (columns widget, current page
+// disabled); nav clicks re-render via settings_tab + updateDialog.
+const SETTINGS_TABS = [
+  { id: 'reminders', label: '⏰ Reminder Settings' },
+  { id: 'meetings',  label: '📅 Meeting Settings' }
+];
+
+const hourItems = (from, to, selectedHour) =>
+  Array.from({ length: to - from + 1 }, (_, i) => {
+    const h = i + from;
+    return { text: `${String(h).padStart(2, '0')}:00`, value: String(h), selected: Number(selectedHour) === h };
+  });
+
+function settingsTabContent(tab, settings) {
+  if (tab === 'meetings') {
+    return [
+      {
+        textParagraph: {
+          text:
+            '<b>📅 Meeting Settings</b>\n' +
+            'The time window the Kitten searches when you ask it to <b>find a meeting time</b> ' +
+            '("📅 Plan a meeting" → Find a time). Only slots inside this window are suggested. ' +
+            'Berlin time — stored in the SETTINGS tab of your own Kitten Brain sheet.'
+        }
+      },
+      {
+        selectionInput: {
+          name: 'meeting_start',
+          type: 'DROPDOWN',
+          label: '🕘 Search from (Berlin time)',
+          items: hourItems(6, 20, settings.meeting_start ?? 9)
+        }
+      },
+      {
+        selectionInput: {
+          name: 'meeting_end',
+          type: 'DROPDOWN',
+          label: '🕕 Search until (Berlin time)',
+          items: hourItems(7, 22, settings.meeting_end ?? 18)
+        }
+      },
+      { textParagraph: { text: '<font color="#80868B">Default: 09:00 – 18:00.</font>' } },
+      {
+        buttonList: {
+          buttons: [{ text: 'Save', onClick: buttonAction('meeting_settings_submit') }]
+        }
+      }
+    ];
+  }
+
+  // default: reminder settings
+  return [
+    {
+      textParagraph: {
+        text:
+          '<b>⏰ Reminder Settings</b>\n' +
+          'Stored in the <b>SETTINGS</b> tab of your own Kitten Brain sheet — your memories are untouched.'
+      }
+    },
+    {
+      selectionInput: {
+        name: 'reminder_opts',
+        type: 'SWITCH',
+        label: 'What may the Kitten do for you?',
+        items: [
+          { text: '🔔 Send me reminders (master switch)', value: 'reminders_enabled', selected: !!settings.reminders_enabled },
+          { text: '⏰ Remind me of my tasks due today (daily DM)', value: 'daily_tasks', selected: !!settings.daily_tasks },
+          { text: '🌅 Morning day-brief (today\'s meetings, daily DM)', value: 'morning_brief', selected: !!settings.morning_brief },
+          { text: '📝 Allow "create me a task ..." via chat', value: 'task_create', selected: !!settings.task_create }
+        ]
+      }
+    },
+    {
+      selectionInput: {
+        name: 'digest_hour',
+        type: 'DROPDOWN',
+        label: '🕗 Daily reminder time (Berlin) — tasks & day-brief',
+        items: hourItems(6, 20, settings.digest_hour ?? 8)
+      }
+    },
+    {
+      buttonList: {
+        buttons: [{ text: 'Save', onClick: buttonAction('reminder_settings_submit') }]
+      }
+    }
+  ];
+}
+
+function buildSettingsCardObject(settings, tab = 'reminders') {
+  const navWidgets = [{
+    buttonList: {
+      buttons: SETTINGS_TABS.map(t => ({
+        text: t.id === tab ? `▸ ${t.label}` : t.label,
+        disabled: t.id === tab,
+        onClick: buttonAction('settings_tab', false, [{ key: 'tab', value: t.id }])
+      }))
+    }
+  }];
   return {
     sections: [
       {
-        header: '⏰ Reminder settings',
+        header: '⚙️ Settings',
         widgets: [
           {
-            textParagraph: {
-              text: 'Stored in the <b>SETTINGS</b> tab of your own Kitten Brain sheet — your memories are untouched.'
-            }
-          },
-          {
-            selectionInput: {
-              name: 'reminder_opts',
-              type: 'SWITCH',
-              label: 'What may the Kitten do for you?',
-              items: [
-                { text: '🔔 Send me reminders (master switch)', value: 'reminders_enabled', selected: !!settings.reminders_enabled },
-                { text: '⏰ Remind me of my tasks due today (daily DM)', value: 'daily_tasks', selected: !!settings.daily_tasks },
-                { text: '🌅 Morning day-brief (today\'s meetings, daily DM)', value: 'morning_brief', selected: !!settings.morning_brief },
-                { text: '📝 Allow "create me a task ..." via chat', value: 'task_create', selected: !!settings.task_create }
+            columns: {
+              columnItems: [
+                {
+                  horizontalSizeStyle: 'FILL_MINIMUM_SPACE',
+                  horizontalAlignment: 'START',
+                  verticalAlignment: 'TOP',
+                  widgets: navWidgets
+                },
+                {
+                  horizontalSizeStyle: 'FILL_AVAILABLE_SPACE',
+                  horizontalAlignment: 'START',
+                  verticalAlignment: 'TOP',
+                  widgets: settingsTabContent(tab, settings)
+                }
               ]
-            }
-          },
-          {
-            selectionInput: {
-              name: 'digest_hour',
-              type: 'DROPDOWN',
-              label: '🕗 Daily reminder time (Berlin) — tasks & day-brief',
-              items: Array.from({ length: 15 }, (_, i) => {
-                const h = i + 6; // 06:00 … 20:00
-                return { text: `${String(h).padStart(2, '0')}:00`, value: String(h), selected: Number(settings.digest_hour) === h };
-              })
-            }
-          },
-          {
-            buttonList: {
-              buttons: [{ text: 'Save', onClick: buttonAction('reminder_settings_submit') }]
             }
           }
         ]
       }
     ]
+  };
+}
+
+// ---------- 📅 "Plan a meeting" dialog (side navigation) ----------
+// Two pages: Create event (title, start, duration, guests, description) and
+// Find a time (date, duration, guests → free-slot suggestions). A Google
+// Meet link is attached automatically; guests get normal Google invitations.
+const MEETING_TABS = [
+  { id: 'create', label: '📅 Create event' },
+  { id: 'find',   label: '🔎 Find a time' }
+];
+
+const DURATION_ITEMS = (selected) => [15, 30, 45, 60, 90, 120].map(m => ({
+  text: `${m} minutes`, value: String(m), selected: Number(selected) === m
+}));
+
+function meetingTabContent(tab, settings, prefill = {}) {
+  if (tab === 'find') {
+    const from = String(settings.meeting_start ?? 9).padStart(2, '0');
+    const to = String(settings.meeting_end ?? 18).padStart(2, '0');
+    return [
+      {
+        textParagraph: {
+          text:
+            'Pick a day, duration and guests — I check everyone\'s <b>free/busy status</b> ' +
+            '(never event details) and suggest times where all are free. Calendars I can\'t ' +
+            'read (e.g. external guests) are reported and skipped.'
+        }
+      },
+      {
+        dateTimePicker: {
+          label: 'Day to search',
+          name: 'find_date',
+          type: 'DATE_ONLY'
+        }
+      },
+      {
+        selectionInput: {
+          name: 'find_duration',
+          type: 'DROPDOWN',
+          label: 'Meeting length',
+          items: DURATION_ITEMS(prefill.duration || 60)
+        }
+      },
+      {
+        textInput: {
+          label: 'Guests (emails, comma-separated)',
+          type: 'SINGLE_LINE',
+          name: 'find_guests',
+          value: prefill.guests || ''
+        }
+      },
+      {
+        textParagraph: {
+          text: `<font color="#80868B">Search window: ${from}:00 – ${to}:00 Berlin — change it under ⚙️ Settings → 📅 Meeting Settings.</font>`
+        }
+      },
+      {
+        buttonList: {
+          buttons: [{ text: '🔎 Find free times', onClick: buttonAction('findtime_submit') }]
+        }
+      }
+    ];
+  }
+
+  // default: create event
+  return [
+    {
+      textInput: {
+        label: 'Title',
+        type: 'SINGLE_LINE',
+        name: 'event_title',
+        value: prefill.title || ''
+      }
+    },
+    {
+      dateTimePicker: {
+        label: 'Start (date & time)',
+        name: 'event_start',
+        type: 'DATE_AND_TIME',
+        ...(prefill.startMs ? { valueMsEpoch: String(prefill.startMs) } : {})
+      }
+    },
+    {
+      selectionInput: {
+        name: 'event_duration',
+        type: 'DROPDOWN',
+        label: 'Duration',
+        items: DURATION_ITEMS(prefill.duration || 60)
+      }
+    },
+    {
+      textInput: {
+        label: 'Guests (emails, comma-separated — optional)',
+        type: 'SINGLE_LINE',
+        name: 'event_guests',
+        value: prefill.guests || ''
+      }
+    },
+    {
+      textInput: {
+        label: 'Description (optional)',
+        type: 'MULTIPLE_LINE',
+        name: 'event_desc'
+      }
+    },
+    {
+      textParagraph: {
+        text: '<font color="#80868B">A Google Meet link is added automatically. All guests receive a normal Google Calendar invitation. The event lands in YOUR calendar.</font>'
+      }
+    },
+    {
+      buttonList: {
+        buttons: [{ text: '📅 Create event', onClick: buttonAction('event_create_submit') }]
+      }
+    }
+  ];
+}
+
+function buildMeetingPlannerCardObject(settings, tab = 'create', prefill = {}) {
+  const navWidgets = [{
+    buttonList: {
+      buttons: MEETING_TABS.map(t => ({
+        text: t.id === tab ? `▸ ${t.label}` : t.label,
+        disabled: t.id === tab,
+        onClick: buttonAction('meeting_planner_tab', false, [{ key: 'tab', value: t.id }])
+      }))
+    }
+  }];
+  return {
+    sections: [
+      {
+        header: '📅 Plan a meeting',
+        widgets: [
+          {
+            columns: {
+              columnItems: [
+                {
+                  horizontalSizeStyle: 'FILL_MINIMUM_SPACE',
+                  horizontalAlignment: 'START',
+                  verticalAlignment: 'TOP',
+                  widgets: navWidgets
+                },
+                {
+                  horizontalSizeStyle: 'FILL_AVAILABLE_SPACE',
+                  horizontalAlignment: 'START',
+                  verticalAlignment: 'TOP',
+                  widgets: meetingTabContent(tab, settings, prefill)
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  };
+}
+
+// Chat reply that offers to open the meeting planner (dialogs can only be
+// opened from a button click — Chat platform rule).
+function buildMeetingHubMessage() {
+  return {
+    text: '📅 Plan a meeting',
+    cardsV2: [
+      {
+        cardId: 'meeting_hub',
+        card: {
+          sections: [
+            {
+              widgets: [
+                {
+                  textParagraph: {
+                    text:
+                      '📅 I can <b>create a calendar event</b> for you (with guests + automatic ' +
+                      'Google Meet link) — or first <b>find a time</b> when all your guests are free.'
+                  }
+                },
+                {
+                  buttonList: {
+                    buttons: [
+                      { text: '📅 Create event…', onClick: buttonAction('open_meeting_planner', true, [{ key: 'tab', value: 'create' }]) },
+                      { text: '🔎 Find a time…', onClick: buttonAction('open_meeting_planner', true, [{ key: 'tab', value: 'find' }]) }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  };
+}
+
+// Free-slot results as a chat message: notice text + one button per slot.
+// Each slot button opens the planner's Create page PREFILLED with that time,
+// the duration and the guest list. slots: [{ label, startMs }].
+function buildFindTimeResultsMessage(headerText, slots, durationMin, guestsCsv) {
+  const widgets = [{ textParagraph: { text: headerText } }];
+  if (slots.length) {
+    widgets.push({
+      buttonList: {
+        buttons: slots.map(s => ({
+          text: `🕐 ${s.label}`,
+          onClick: buttonAction('open_meeting_planner', true, [
+            { key: 'tab', value: 'create' },
+            { key: 'startMs', value: String(s.startMs) },
+            { key: 'duration', value: String(durationMin) },
+            { key: 'guests', value: (guestsCsv || '').slice(0, 500) }
+          ])
+        }))
+      }
+    });
+    widgets.push({ textParagraph: { text: '<font color="#80868B">Click a time to create the event — the form comes prefilled, you just add the title.</font>' } });
+  }
+  return {
+    text: '🔎 Free time suggestions',
+    cardsV2: [{ cardId: 'findtime_results', card: { sections: [{ widgets }] } }]
   };
 }
 
@@ -449,15 +750,17 @@ function functionsTabContent(tab, settings, hasBrain) {
             '• <b>forget ...</b> — I show you where to delete it (you stay in control)\n' +
             '• Your memories are only ever used in YOUR conversations with me\n' +
             '• The folder "Kitten Brain" in your Drive must not be deleted\n' +
-            '• Your ⏰ Reminder settings are stored there too (SETTINGS tab)'
+            '• Your ⚙️ Settings (reminders & meetings) are stored there too (SETTINGS tab)'
         }
       }]
     };
   }
 
   if (tab === 'reminders') {
+    const mFrom = String(settings.meeting_start ?? 9).padStart(2, '0');
+    const mTo = String(settings.meeting_end ?? 18).padStart(2, '0');
     return {
-      header: '⏰ Reminders — features & your current setup',
+      header: '⏰ Reminders & meetings — features & your current setup',
       widgets: [{
         textParagraph: {
           text:
@@ -465,13 +768,16 @@ function functionsTabContent(tab, settings, hasBrain) {
             '⏰ Daily "tasks due today" DM — your open Google Tasks every morning\n' +
             '🌅 Morning day-brief — today\'s meetings (+ tasks) in one morning DM\n' +
             '⏱️ One-off reminders — "remind me in 2 hours to ..." (see Chat commands)\n' +
-            '📝 Create Google Tasks by chat — I never delete or complete tasks\n\n' +
+            '📝 Create Google Tasks by chat — I never delete or complete tasks\n' +
+            '📅 Create calendar events (auto Google Meet link, invitations to all guests)\n' +
+            '🔎 Find a meeting time — I check the free/busy status of all guests and suggest slots where everyone is free (unreadable calendars, e.g. externals, are reported and skipped)\n\n' +
             '<b>Your current setup:</b>\n' +
             `🔔 Reminders (master switch): ${on(settings.reminders_enabled)}\n` +
             `⏰ Daily tasks DM (${hour}:00 Berlin): ${on(settings.daily_tasks)}\n` +
             `🌅 Morning day-brief (${hour}:00 Berlin): ${on(settings.morning_brief)}\n` +
-            `📝 "create me a task ..." via chat: ${on(settings.task_create)}\n\n` +
-            `Change these: menu → ⏰ Reminder settings${hasBrain ? '' : ' (needs a Kitten Brain first)'}`
+            `📝 "create me a task ..." via chat: ${on(settings.task_create)}\n` +
+            `📅 Meeting search window: ${mFrom}:00 – ${mTo}:00 (Berlin)\n\n` +
+            `Change these: menu → ⚙️ Settings (⏰ Reminder Settings / 📅 Meeting Settings)${hasBrain ? '' : ' (needs a Kitten Brain first)'}`
         }
       }]
     };
@@ -484,11 +790,12 @@ function functionsTabContent(tab, settings, hasBrain) {
         textParagraph: {
           text:
             '<b>kitten</b> / <b>kitty</b> / <b>help</b> — open the menu\n\n' +
-            '<b>create me a task for</b> ordering a new cable — new Google Task (popup with optional date)\n\n' +
+            '<b>create me a task for</b> ordering a new cable — new Google Task (popup with optional date)\n' +
+            '<b>create a meeting</b> / <b>find a time</b> — open the 📅 meeting planner (create events, find free slots)\n\n' +
             '<b>remember</b> I use a MacBook Pro — store a private memory (needs a Kitten Brain)\n' +
             '<b>forget</b> ... — I show you where to delete a memory\n\n' +
-            '<b>remind me in 2 hours to</b> check the deploy — one-off reminder ' +
-            '(times like "at 15:30", "tomorrow at 9", "on friday" or "on 24.12. at 10" work too)\n' +
+            '<b>remind me in 2 hours to</b> check the deploy — one-off reminder, stored privately ' +
+            'in your Kitten Brain (times like "at 15:30", "tomorrow at 9", "on friday" or "on 24.12. at 10" work too)\n' +
             '<b>my reminders</b> — list your open reminders, each with a number\n' +
             '<b>cancel reminder</b> + the number from that list (e.g. <b>cancel reminder 1</b>) — cancel it. ' +
             'Or use the ⏱️ <b>My reminders</b> menu button and cancel with one click.\n\n' +
@@ -510,8 +817,9 @@ function functionsTabContent(tab, settings, hasBrain) {
           '📄 <b>Submit a New FAQ</b> — add knowledge to the FAQ database\n' +
           '📶 <b>WiFi password</b> — office & guest WiFi\n' +
           '📋 <b>My Open Jira Tickets</b> — your open tickets, paginated\n' +
+          '📅 <b>Plan a meeting</b> — create calendar events (auto Meet link) or find a time when all guests are free\n' +
           '🧠 <b>Create / Gogo Kitten Brain</b> — your private memory\n' +
-          '⏰ <b>Reminder settings</b> — configure all reminder features\n' +
+          '⚙️ <b>Settings</b> — Reminder Settings & Meeting Settings\n' +
           '⏱️ <b>My reminders</b> — see & cancel your one-off reminders\n' +
           '❓ <b>What can I do?</b> — this overview\n\n' +
           '📚 Plus the <b>FAQ live search</b> field at the top of the menu.'
@@ -570,9 +878,9 @@ function buildFunctionsCardObject(settings, hasBrain, tab = 'standard') {
 }
 
 // ---------- ⏱️ "My reminders" dialog ----------
-// reminders: [{ row, when, text }] — `row` is the sheet row (stable id for
-// the cancel button), `when` is the already-formatted Berlin timestamp.
-// Cancel buttons re-render this dialog via cancel_reminder_row.
+// reminders: [{ row, when, text }] — `row` is the row in the USER'S OWN brain
+// sheet (stable id for the cancel button), `when` is the already-formatted
+// Berlin timestamp. Cancel buttons re-render this dialog via cancel_reminder_row.
 function buildMyRemindersCardObject(reminders, hasBrain = true) {
   const widgets = [];
   if (!hasBrain) {
@@ -837,12 +1145,15 @@ module.exports = {
   buildFaqDialogCardObject,
   buildJiraDialogCardObject,
   buildTicketCreatedMessage,
-  buildReminderSettingsCardObject,
+  buildSettingsCardObject,
   buildFunctionsCardObject,
   buildMyRemindersCardObject,
   buildAdminCardObject,
   buildTaskDialogCardObject,
   buildTaskOfferMessage,
+  buildMeetingPlannerCardObject,
+  buildMeetingHubMessage,
+  buildFindTimeResultsMessage,
   answerTextFor,
   extractUrls,
   isLinkOnlyAnswer,
