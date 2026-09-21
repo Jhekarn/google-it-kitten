@@ -959,9 +959,10 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
 
             try {
               const ticket = await createJiraTicket({ title, description, reporterEmail, projectKey });
-              const ticketUrl = `${process.env.JIRA_BASE_URL}/browse/${ticket.key}`;
+              // webUrl comes from Jira.js: JSM desks (IH, SECHELP) get the
+              // customer-portal request view, plain projects get /browse/KEY
               console.log(`🎫 Jira ticket created: ${ticket.key} (${projectKey}) by ${reporterEmail}`);
-              return res.json(w.newMessage(buildTicketCreatedMessage(ticket.key, ticketUrl)));
+              return res.json(w.newMessage(buildTicketCreatedMessage(ticket.key, ticket.webUrl)));
             } catch (err) {
               console.error('❌ Jira ticket creation failed:', err.response?.data || err.message);
               return res.json(w.closeDialog('❌ Failed to create the Jira ticket. Please try again or contact IT.'));
