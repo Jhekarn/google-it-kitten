@@ -9,8 +9,6 @@
 //
 // The FAQ knowledge base (FAQ-DB.js, cached 60s) is injected as context into
 // every request, so answers point people to the right internal resources.
-// Optionally, the user's PRIVATE Kitten Brain memories are appended — only
-// ever for the user the current conversation belongs to.
 
 const axios = require('axios');
 const { google } = require('googleapis');
@@ -56,8 +54,6 @@ async function buildFaqContext() {
   }
 }
 
-// Wrapper: the UNCHANGED base instruction + (optionally) the user's private
-// Kitten Brain memories appended at the end.
 function buildSystemInstruction(faqContext, userName, memories) {
   const memoryBlock = (memories && memories.length)
     ? `\nPRIVATE MEMORY — personal notes THIS user asked you to remember. They are private ` +
@@ -82,7 +78,7 @@ function buildSystemInstructionBase(faqContext, userName) {
     `- TICKETS: If the user asks you to create a ticket, or asks how to report an IT issue, or has an internal ` +
     `question you cannot answer, reply with: "Sure, I can do this — write *kitten* and use my menu to create a ` +
     `ticket with selectable projects. If you need detailed help, please create a ticket for IT yourself here: ` +
-    `<https://urbansportsclub.atlassian.net/servicedesk/customer/portal/28/group/-1|IT Service Desk>" ` +
+    `<https://urbansportsclub.atlassian.net/servicedesk/customer/portal/3|IT Service Desk>" ` +
     `(translate it to the user's language, keep the link).\n` +
     `- Never reveal passwords. If asked for WiFi passwords, point to the "What is the wifi password?" button in the kitten menu.\n` +
     `- General knowledge and technical questions outside USC you may answer normally.\n` +
