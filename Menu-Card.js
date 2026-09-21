@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.8.2';
+const KITTEN_VERSION = '2.9.0';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
@@ -255,22 +255,28 @@ function answerTextFor(functionName) {
 
 // The "New Jira Ticket" dialog card — ported from Slack's open_jira_modal.
 // Projects: IT Helpdesk (IH), SRE (SRE), DevX (DX), Security (SECHELP).
-function buildJiraDialogCardObject() {
+// `prefill` (since v2.9.0, all optional): { team, title, description, note } —
+// used by the "🎫 Open a ticket for this" offer to open the dialog with the
+// AI-drafted title/description and the suggested team preselected. The user
+// reviews, adjusts the team if needed, and clicks Create.
+function buildJiraDialogCardObject(prefill = {}) {
+  const team = ['IH', 'SRE', 'DX', 'SECHELP'].includes(prefill.team) ? prefill.team : 'IH';
   return {
     sections: [
       {
         header: 'New Jira Ticket',
         widgets: [
+          ...(prefill.note ? [{ textParagraph: { text: `<font color="#80868B">${prefill.note}</font>` } }] : []),
           {
             selectionInput: {
               name: 'jira_project',
               type: 'DROPDOWN',
               label: 'Which project is this for?',
               items: [
-                { text: 'IT Helpdesk - #it-support', value: 'IH', selected: true },
-                { text: 'SRE Team - #hive-platform-ask', value: 'SRE' },
-                { text: 'DevX Team - #hive-platform-ask', value: 'DX' },
-                { text: 'Security Team - #security-ask', value: 'SECHELP' }
+                { text: 'IT Helpdesk - #it-support', value: 'IH', selected: team === 'IH' },
+                { text: 'SRE Team - #hive-platform-ask', value: 'SRE', selected: team === 'SRE' },
+                { text: 'DevX Team - #hive-platform-ask', value: 'DX', selected: team === 'DX' },
+                { text: 'Security Team - #security-ask', value: 'SECHELP', selected: team === 'SECHELP' }
               ]
             }
           },
@@ -278,14 +284,16 @@ function buildJiraDialogCardObject() {
             textInput: {
               label: 'Ticket Title',
               type: 'SINGLE_LINE',
-              name: 'jira_title'
+              name: 'jira_title',
+              ...(prefill.title ? { value: prefill.title } : {})
             }
           },
           {
             textInput: {
               label: 'Ticket Description',
               type: 'MULTIPLE_LINE',
-              name: 'jira_desc'
+              name: 'jira_desc',
+              ...(prefill.description ? { value: prefill.description } : {})
             }
           },
           {
@@ -299,6 +307,37 @@ function buildJiraDialogCardObject() {
             }
           }
         ]
+      }
+    ]
+  };
+}
+
+// Chat answer that carries the "🎫 Open a ticket for this" offer (v2.9.0):
+// the AI answer as plain text (keeps *bold* chat formatting) + a small card
+// with the button. The draft itself is cached server-side (too large for
+// button parameters) — the click (open_ticket_draft) fetches it there.
+function buildTicketOfferAnswerMessage(answerText) {
+  return {
+    text: answerText,
+    cardsV2: [
+      {
+        cardId: 'ticket_offer',
+        card: {
+          sections: [
+            {
+              widgets: [
+                {
+                  buttonList: {
+                    buttons: [
+                      { text: '🎫 Open a ticket for this…', onClick: buttonAction('open_ticket_draft', true) }
+                    ]
+                  }
+                },
+                { textParagraph: { text: '<font color="#80868B">Opens prefilled with your issue — you just check the team and hit Create.</font>' } }
+              ]
+            }
+          ]
+        }
       }
     ]
   };
@@ -811,7 +850,9 @@ function functionsTabContent(tab, settings, hasBrain) {
             '<b>my reminders</b> — list your open reminders, each with a number\n' +
             '<b>cancel reminder</b> + the number from that list (e.g. <b>cancel reminder 1</b>) — cancel it. ' +
             'Or use the ⏱️ <b>My reminders</b> menu button and cancel with one click.\n\n' +
-            '🤖 <b>Anything else</b> — free-text questions go to my AI brain (any language)'
+            '🤖 <b>Anything else</b> — free-text questions go to my AI brain (any language). I remember the ' +
+            'last few messages of our chat, and if I can\'t solve your IT problem I\'ll offer a 🎫 button that ' +
+            'opens a ticket already filled with your issue and what we tried — you just pick the team.'
         }
       }]
     };
@@ -1163,6 +1204,7 @@ module.exports = {
   buildAdminCardObject,
   buildTaskDialogCardObject,
   buildTaskOfferMessage,
+  buildTicketOfferAnswerMessage,
   buildMeetingPlannerCardObject,
   buildMeetingHubMessage,
   buildFindTimeResultsMessage,
