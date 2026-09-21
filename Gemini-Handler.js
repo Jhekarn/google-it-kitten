@@ -9,6 +9,13 @@
 //
 // The FAQ knowledge base (FAQ-DB.js, cached 60s) is injected as context into
 // every request, so answers point people to the right internal resources.
+//
+// Since v2.9.0 the model answers STRUCTURED (JSON): the chat answer plus an
+// optional TICKET DRAFT (title / description / steps already tried / team)
+// built from the conversation — server.js turns that into the "🎫 Open a
+// ticket for this" offer with a fully prefilled Jira dialog. The recent
+// conversation (server-side, RAM-only) is passed in as `history` so
+// follow-ups like "that didn't work" keep their context.
 
 const axios = require('axios');
 const { google } = require('googleapis');
@@ -75,22 +82,61 @@ function buildSystemInstructionBase(faqContext, userName) {
     `- Answer in the language the user writes in.\n` +
     `- Use the internal IT knowledge base below whenever it is relevant, and include its links.\n` +
     `- Never invent internal USC facts, links, passwords or policies that are not in the knowledge base.\n` +
-    `- TICKETS: If the user asks you to create a ticket, or asks how to report an IT issue, or has an internal ` +
-    `question you cannot answer, reply with: "Sure, I can do this — write *kitten* and use my menu to create a ` +
-    `ticket with selectable projects. If you need detailed help, please create a ticket for IT yourself here: ` +
-    `<https://urbansportsclub.atlassian.net/servicedesk/customer/portal/3|IT Service Desk>" ` +
-    `(translate it to the user's language, keep the link).\n` +
     `- Never reveal passwords. If asked for WiFi passwords, point to the "What is the wifi password?" button in the kitten menu.\n` +
     `- General knowledge and technical questions outside USC you may answer normally.\n` +
-    `- FORMATTING for Google Chat: *bold* with single asterisks, _italic_ with underscores, ` +
+    `- FORMATTING for the "answer" field (Google Chat): *bold* with single asterisks, _italic_ with underscores, ` +
     `links as <https://url|link text>, simple "-" lists. NO markdown headings, NO tables, NO ** double asterisks.\n\n` +
+    `OUTPUT FORMAT — you respond ONLY with one JSON object, nothing else:\n` +
+    `{"answer": string, "offer_ticket": boolean, "ticket": {"title": string, "description": string, "steps_tried": string, "team": string}}\n\n` +
+    `TICKET OFFERS ("offer_ticket"): set it to true when the user describes an IT problem you cannot ` +
+    `definitively solve yourself, explicitly asks to create/open a ticket, reports that suggested fixes did ` +
+    `not work, or has an internal request that only a team can fulfil (access, hardware, repairs, security ` +
+    `incidents...). For ordinary questions you can fully answer, set it to false and OMIT "ticket". ` +
+    `When true, also build "ticket" FROM THE CONVERSATION:\n` +
+    `- "title": one short, precise ticket title (max 90 characters).\n` +
+    `- "description": the issue in clear, complete sentences (device, what happens, impact). Only facts the ` +
+    `user actually gave — never invent details.\n` +
+    `- "steps_tried": what was already suggested or tried WITHOUT success in this conversation, as short "-" ` +
+    `lines; "None yet" if nothing was tried.\n` +
+    `- "team": exactly one of "IH" (IT Helpdesk — the default for general IT), "SECHELP" (security incidents, ` +
+    `phishing, compromised accounts), "SRE" (platform/infrastructure engineering), "DX" (developer tooling).\n` +
+    `When offering a ticket, end your "answer" by mentioning they can use the button below to open a ` +
+    `prefilled ticket — or, if they prefer, create one themselves at ` +
+    `<https://urbansportsclub.atlassian.net/servicedesk/customer/portal/3|IT Service Desk>.\n\n` +
     (faqContext ? `Internal IT knowledge base (title: answer):\n${faqContext}` : '')
   );
 }
 
-// Ask Gemini. Returns the answer text, or null when the feature is disabled.
-// Throws on API errors (caller decides the fallback message).
-async function askGemini(question, userName, memories = []) {
+// Parse the model's JSON (tolerates ```json fences). Falls back to treating
+// the whole text as a plain answer if parsing fails — never breaks the chat.
+function parseStructured(raw) {
+  try {
+    const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+    const obj = JSON.parse(cleaned);
+    if (typeof obj.answer !== 'string' || !obj.answer.trim()) throw new Error('no answer field');
+    let ticket = null;
+    if (obj.offer_ticket && obj.ticket && typeof obj.ticket.title === 'string' && obj.ticket.title.trim()) {
+      const t = obj.ticket;
+      ticket = {
+        title: String(t.title).slice(0, 150),
+        description: String(t.description || '').slice(0, 4000),
+        steps_tried: String(t.steps_tried || 'None yet').slice(0, 2000),
+        team: ['IH', 'SRE', 'DX', 'SECHELP'].includes(t.team) ? t.team : 'IH'
+      };
+    }
+    return { answer: obj.answer.trim(), ticket };
+  } catch (err) {
+    console.warn('⚠️ Gemini JSON parse failed — using raw text as answer:', err.message);
+    return { answer: raw.trim(), ticket: null };
+  }
+}
+
+// Ask Gemini. `history` = recent conversation turns of THIS user
+// ([{ role: 'user'|'model', text }], RAM-only, provided by server.js).
+// Returns { answer, ticket } — ticket is null or the draft for the
+// "🎫 Open a ticket for this" offer. Returns null when the feature is
+// disabled. Throws on API errors (caller decides the fallback message).
+async function askKitten({ question, userName, memories = [], history = [] }) {
   if (!isEnabled()) return null;
 
   const [token, faqContext] = await Promise.all([getAccessToken(), buildFaqContext()]);
@@ -99,10 +145,16 @@ async function askGemini(question, userName, memories = []) {
     `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${process.env.VERTEX_PROJECT_ID}` +
     `/locations/${LOCATION}/publishers/google/models/${MODEL}:generateContent`;
 
+  // recent conversation first, current question last
+  const contents = [
+    ...history.map(h => ({ role: h.role === 'model' ? 'model' : 'user', parts: [{ text: h.text }] })),
+    { role: 'user', parts: [{ text: question }] }
+  ];
+
   const body = {
     systemInstruction: { parts: [{ text: buildSystemInstruction(faqContext, userName, memories) }] },
-    contents: [{ role: 'user', parts: [{ text: question }] }],
-    generationConfig: { temperature: 0.4, maxOutputTokens: 1024 }
+    contents,
+    generationConfig: { temperature: 0.4, maxOutputTokens: 1536, responseMimeType: 'application/json' }
   };
 
   const res = await axios.post(url, body, {
@@ -111,17 +163,16 @@ async function askGemini(question, userName, memories = []) {
   });
 
   const parts = res.data?.candidates?.[0]?.content?.parts || [];
-  let answer = parts.map(p => p.text || '').join('').trim();
+  const raw = parts.map(p => p.text || '').join('').trim();
 
-  if (!answer) {
+  if (!raw) {
     const reason = res.data?.candidates?.[0]?.finishReason || 'no content';
     throw new Error(`Gemini returned no text (${reason})`);
   }
 
-  if (answer.length > MAX_ANSWER_CHARS) {
-    answer = answer.slice(0, MAX_ANSWER_CHARS - 2) + ' …';
-  }
-  return answer;
+  const { answer, ticket } = parseStructured(raw);
+  const trimmed = answer.length > MAX_ANSWER_CHARS ? answer.slice(0, MAX_ANSWER_CHARS - 2) + ' …' : answer;
+  return { answer: trimmed, ticket };
 }
 
-module.exports = { askGemini, isEnabled };
+module.exports = { askKitten, isEnabled };
