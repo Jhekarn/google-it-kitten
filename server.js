@@ -33,6 +33,7 @@ const {
   buildAdminCardObject,
   buildTaskDialogCardObject,
   buildTaskOfferMessage,
+  buildTicketOfferAnswerMessage,
   buildMeetingPlannerCardObject,
   buildMeetingHubMessage,
   buildFindTimeResultsMessage,
@@ -48,7 +49,7 @@ const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
 const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
 const { postOps, postToSpace: postToSpaceViaPoster, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
-const { askGemini, isEnabled: geminiEnabled } = require('./Gemini-Handler');
+const { askKitten, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, isAdmin } = require('./Kitten-Brain');
 const { createTask, runDailyTaskDigest, berlinHour } = require('./Kitten-Tasks');
 const { parseReminder, addReminder, listOpenReminders, cancelReminder, cancelReminderByRow, checkDueReminders, fmtBerlin, berlinParts, berlinToUtcMs } = require('./Kitten-Reminders');
@@ -60,6 +61,58 @@ const berlinHHMM = ms => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Be
 const berlinDay = ms => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(ms)).replace(',', '');
 // "Thu 24/09" in Berlin time — short, for week-scan slot buttons
 const berlinDayShort = ms => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Berlin', weekday: 'short', day: '2-digit', month: '2-digit' }).format(new Date(ms)).replace(',', '');
+
+// ---- Short-term conversation memory + ticket drafts (v2.9.0) ----
+// RAM ONLY, by design: nothing is ever written to a sheet. Both stores
+// auto-expire and are hard-capped, so worst-case memory use is a few MB.
+// A restart/deploy simply clears them (the Kitten forgets the last hour of
+// small talk — harmless, and the ticket-offer click handles a missing draft).
+const CHAT_TTL_MS = 60 * 60 * 1000;   // forget conversations after 1h idle
+const CHAT_MAX_TURNS = 8;             // turns kept per user (user+model)
+const CHAT_TURN_MAX_CHARS = 500;      // long pastes are truncated before storing
+const CHAT_MAX_USERS = 300;           // LRU cap across all users
+
+const chatHistories = new Map();      // email -> { turns: [{role, text}], at }
+const ticketDrafts = new Map();       // email -> { draft: {title, description, steps_tried, team}, at }
+
+function getHistory(email) {
+  if (!email) return [];
+  const h = chatHistories.get(email);
+  if (!h) return [];
+  if (Date.now() - h.at > CHAT_TTL_MS) { chatHistories.delete(email); return []; }
+  return h.turns;
+}
+
+function pushHistory(email, role, text) {
+  if (!email || !text) return;
+  const h = chatHistories.get(email) || { turns: [], at: 0 };
+  h.turns.push({ role, text: String(text).slice(0, CHAT_TURN_MAX_CHARS) });
+  if (h.turns.length > CHAT_MAX_TURNS) h.turns.splice(0, h.turns.length - CHAT_MAX_TURNS);
+  h.at = Date.now();
+  chatHistories.set(email, h);
+  if (chatHistories.size > CHAT_MAX_USERS) {           // evict least recently active
+    let oldestKey = null, oldestAt = Infinity;
+    for (const [k, v] of chatHistories) if (v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
+    if (oldestKey) chatHistories.delete(oldestKey);
+  }
+}
+
+function storeTicketDraft(email, draft) {
+  if (!email || !draft) return;
+  ticketDrafts.set(email, { draft, at: Date.now() });
+  if (ticketDrafts.size > CHAT_MAX_USERS) {
+    let oldestKey = null, oldestAt = Infinity;
+    for (const [k, v] of ticketDrafts) if (v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
+    if (oldestKey) ticketDrafts.delete(oldestKey);
+  }
+}
+
+function takeTicketDraft(email) {
+  const d = email && ticketDrafts.get(email);
+  if (!d) return null;
+  if (Date.now() - d.at > CHAT_TTL_MS) { ticketDrafts.delete(email); return null; }
+  return d.draft;
+}
 
 // ---- Prepared announcement DMs (used by /jobs AND the 🛠️ Admin dialog) ----
 const ANNOUNCEMENTS = {
@@ -522,12 +575,26 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
         }
 
         // 🤖 Free text → Gemini (grounded in the FAQ knowledge base + the
-        // user's PRIVATE Kitten Brain memories — theirs only, never others').
-        // Feature is env-gated: without VERTEX_PROJECT_ID the old hint is shown.
+        // user's PRIVATE Kitten Brain memories — theirs only, never others' —
+        // plus the RAM-only short-term history of THIS conversation).
+        // When Gemini flags an unresolved IT issue, the answer carries the
+        // "🎫 Open a ticket for this" button and the AI-built draft (title,
+        // description, steps already tried, suggested team) is cached for
+        // the prefilled dialog. Env-gated: without VERTEX_PROJECT_ID the old
+        // hint is shown.
         if (geminiEnabled()) {
           try {
-            const memories = await getMemories(ev.user?.email).catch(() => []);
-            const answer = await askGemini(rawText, ev.user?.displayName, memories);
+            const email = ev.user?.email;
+            const memories = await getMemories(email).catch(() => []);
+            const history = getHistory(email);
+            const { answer, ticket } = await askKitten({ question: rawText, userName: ev.user?.displayName, memories, history });
+            pushHistory(email, 'user', rawText);
+            pushHistory(email, 'model', answer);
+            if (ticket) {
+              storeTicketDraft(email, ticket);
+              console.log(`🤖 Gemini answered with ticket offer (${rawText.slice(0, 60)}…) → team ${ticket.team}, "${ticket.title.slice(0, 60)}"`);
+              return res.json(w.newMessage(buildTicketOfferAnswerMessage(answer)));
+            }
             console.log(`🤖 Gemini answered (${rawText.slice(0, 60)}…) → ${answer.length} chars`);
             return res.json(w.newMessage({ text: answer }));
           } catch (err) {
@@ -947,6 +1014,29 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
           case 'open_jira_modal':
             return res.json(w.openDialog(buildJiraDialogCardObject()));
 
+          // 🎫 "Open a ticket for this" (v2.9.0): open the Jira dialog
+          // PREFILLED with the AI draft cached for this user — title,
+          // description + steps already tried, suggested team preselected.
+          // Draft gone (expired / server restarted)? Open the empty dialog
+          // with a friendly note instead of failing.
+          case 'open_ticket_draft': {
+            const draft = takeTicketDraft(ev.user?.email);
+            if (!draft) {
+              return res.json(w.openDialog(buildJiraDialogCardObject({
+                note: '⚠️ My draft of your issue expired — please fill in the details again (sorry!).'
+              })));
+            }
+            const description =
+              `${draft.description}` +
+              `${draft.steps_tried && draft.steps_tried !== 'None yet' ? `\n\nAlready tried without success:\n${draft.steps_tried}` : ''}`;
+            return res.json(w.openDialog(buildJiraDialogCardObject({
+              team: draft.team,
+              title: draft.title,
+              description,
+              note: '🤖 Prefilled from our chat — please check the team and adjust anything before creating.'
+            })));
+          }
+
           case 'jira_dialog_submit': {
             const title = (ev.formInputs?.jira_title?.stringInputs?.value?.[0] || '').trim();
             const description = (ev.formInputs?.jira_desc?.stringInputs?.value?.[0] || '').trim();
@@ -961,6 +1051,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               const ticket = await createJiraTicket({ title, description, reporterEmail, projectKey });
               // webUrl comes from Jira.js: JSM desks (IH, SECHELP) get the
               // customer-portal request view, plain projects get /browse/KEY
+              ticketDrafts.delete(reporterEmail); // draft used up (if there was one)
               console.log(`🎫 Jira ticket created: ${ticket.key} (${projectKey}) by ${reporterEmail}`);
               return res.json(w.newMessage(buildTicketCreatedMessage(ticket.key, ticket.webUrl)));
             } catch (err) {
