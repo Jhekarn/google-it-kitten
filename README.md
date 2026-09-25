@@ -6,7 +6,7 @@ USC internal **IT Kitten** — the IT assistant in **Google Chat** (successor of
 
 **How to read the version number:** 1st digit = platform generation (1.x Slack, 2.x Google Chat), 2nd digit = big feature releases, 3rd digit = small updates within a release. Full history in [RELEASE-NOTES.md](RELEASE-NOTES.md).
 
-## What it does
+## What it does 
 
 - **🤖 AI answers (Gemini / Vertex AI)** — free-text questions in any language, grounded in USC's own FAQ sheet with fixed house rules. Helps first; offers a ticket second.
 - **🎫 Tickets** — creates real **JSM service requests** for IT Helpdesk & Security and normal Jira issues for SRE & DevX, with you as the reporter. Quick Ticket: describe your problem in chat, and if the Kitten can't solve it, one button opens the form prefilled (title, description, what you tried, team preselected). Plus "my open tickets".
