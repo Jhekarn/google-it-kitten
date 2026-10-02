@@ -52,7 +52,7 @@ const { createJiraTicket } = require('./Jira');
 const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
 const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
-const { postOps, postToSpace: postToSpaceViaPoster, postMessageToSpace, listKittenSpaces, listUserSpaces, isSpaceMember, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
+const { postOps, postToSpace: postToSpaceViaPoster, postMessageToSpace, listKittenSpaces, listUserSpaces, isSpaceMember, membershipDetail, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
 const n8n = require('./N8N-Connector');
 const { askKitten, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, isAdmin } = require('./Kitten-Brain');
@@ -336,6 +336,27 @@ app.get('/jobs/:job', async (req, res) => {
       return;
     }
 
+    // 🔎 Membership diagnostic (v2.10.4): print Google's RAW membership
+    // verdict for one user across every space the Kitten is in — exactly
+    // what the 🔌 Automations dropdown filter sees. Admin-key guarded.
+    //   /jobs/membership?key=…&email=someone@urbansportsclub.com
+    if (req.params.job === 'membership') {
+      const target = (req.query.email || '').trim();
+      if (!target || !target.includes('@')) {
+        return res.status(400).send('Add &email=someone@… to check that user\'s space memberships.');
+      }
+      const spaces = await listKittenSpaces();
+      const lines = [];
+      for (const s of spaces) {
+        lines.push(`${s.label}  [${s.id}]\n    → ${await membershipDetail(s.id, target)}`);
+      }
+      return res.type('text/plain').send(
+        `Membership check for ${target} (what the Automations dropdown filter sees):\n\n` +
+        `${lines.join('\n\n')}\n\n` +
+        `Rule: the dropdown shows a space when the verdict is MEMBER with any state except NOT_A_MEMBER.\n` +
+        `Note: being added to a space by an admin makes someone a MEMBER even if they never opened it.`);
+    }
+
     // ⏰ Task digest: DM opted-in users their Google Tasks due today.
     // Single-user test (ignores opt-in & time): /jobs/task-digest?key=…&email=…
     // Full run (opted-in, ALL hours):           /jobs/task-digest?key=…&confirm=1
@@ -354,7 +375,7 @@ app.get('/jobs/:job', async (req, res) => {
       return res.send(`✅ ${summary}`);
     }
 
-    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder, /jobs/broadcast, /jobs/dm-all, /jobs/announce-brain, /jobs/announce-tasks or /jobs/task-digest.');
+    return res.status(404).send('Unknown job. Use /jobs/weekly, /jobs/reminder, /jobs/broadcast, /jobs/dm-all, /jobs/announce-brain, /jobs/announce-tasks, /jobs/task-digest or /jobs/membership.');
   } catch (err) {
     console.error(`🚨 Manual job ${req.params.job} failed:`, err.message);
     return res.status(500).send(`❌ Job failed: ${err.message}`);
