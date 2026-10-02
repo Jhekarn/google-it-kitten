@@ -31,6 +31,7 @@ const {
   buildAutomationsCardObject,
   buildN8nConnectedMessage,
   buildN8nCodeMessage,
+  buildSecretRevealCardObject,
   buildFunctionsCardObject,
   buildMyRemindersCardObject,
   buildAdminCardObject,
@@ -51,7 +52,7 @@ const { createJiraTicket } = require('./Jira');
 const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
 const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
-const { postOps, postToSpace: postToSpaceViaPoster, postMessageToSpace, listKittenSpaces, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
+const { postOps, postToSpace: postToSpaceViaPoster, postMessageToSpace, listKittenSpaces, listUserSpaces, isSpaceMember, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
 const n8n = require('./N8N-Connector');
 const { askKitten, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, isAdmin } = require('./Kitten-Brain');
@@ -118,6 +119,32 @@ function takeTicketDraft(email) {
   return d.draft;
 }
 
+// ---- Pending N8N secret reveals (v2.10.3) — RAM ONLY, deleted on read ----
+// After a successful connection the plaintext secret is parked here until the
+// owner clicks "🔐 Reveal secret". The click TAKES it (delete-on-read), so
+// the popup works exactly once; afterwards the plaintext exists nowhere but
+// the owner's N8N node (the sheet stores only a SHA-256 fingerprint).
+// TTL 1h; a restart clears it — then the owner revokes + reconnects.
+const pendingSecrets = new Map(); // email -> { name, secret, at }
+
+function storePendingSecret(email, name, secret) {
+  if (!email || !secret) return;
+  pendingSecrets.set(email, { name, secret, at: Date.now() });
+  if (pendingSecrets.size > CHAT_MAX_USERS) {
+    let oldestKey = null, oldestAt = Infinity;
+    for (const [k, v] of pendingSecrets) if (v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
+    if (oldestKey) pendingSecrets.delete(oldestKey);
+  }
+}
+
+function takePendingSecret(email) {
+  const d = email && pendingSecrets.get(email);
+  if (!d) return null;
+  pendingSecrets.delete(email); // delete-on-read: the reveal works ONCE
+  if (Date.now() - d.at > CHAT_TTL_MS) return null;
+  return d;
+}
+
 // ---- Prepared announcement DMs (used by /jobs AND the 🛠️ Admin dialog) ----
 const ANNOUNCEMENTS = {
   'dm-all': {
@@ -131,10 +158,10 @@ const ANNOUNCEMENTS = {
     text: (firstName) =>
       `Hey ${firstName || 'there'} 🧠 I learned a new trick — I can now *remember things, just for you*!\n\n` +
       `Type *kitten* and click *🧠 Create Kitten Brain*. From then on, start any message with ` +
-      `*remember* (e.g. "remember I use a MacBook Pro") and I'll keep it in mind whenever we chat. ` +
+      `*remember* (e.g. "remember I use a MacBook Pro") and I’ll keep it in mind whenever we chat. ` +
       `To make me forget something, just open your memory sheet and delete the row.\n\n` +
       `🔒 Your memories live in YOUR own Google Drive — nobody else can see them, ` +
-      `and they're only ever used in your own conversations with me. 🐾`
+      `and they’re only ever used in your own conversations with me. 🐾`
   },
   'announce-tasks': {
     label: '⏰ Reminders & Tasks announcement',
@@ -347,13 +374,17 @@ app.post('/n8n/:code', async (req, res) => {
 });
 
 // Assemble the data for the 🔌 Automations dialog: this user's connections
-// (with space names + their inbound URLs) and the spaces the Kitten is in.
+// (with space names + their inbound URLs) and — for the setup dropdown —
+// ONLY the spaces the USER is a member of too (v2.10.2 security measure:
+// nobody gets to see, or bind reports to, spaces they don't belong to).
+// allSpaces is used purely for labeling the user's existing connections.
 async function automationsDialogData(email) {
-  const [connections, spaces] = await Promise.all([
+  const [connections, allSpaces, userSpaces] = await Promise.all([
     n8n.listUserConnections(email).catch(err => { console.error('❌ n8n list failed:', err.message); return []; }),
-    listKittenSpaces().catch(err => { console.error('❌ space list failed:', err.message); return []; })
+    listKittenSpaces().catch(err => { console.error('❌ space list failed:', err.message); return []; }),
+    listUserSpaces(email).catch(err => { console.error('❌ user-space list failed:', err.message); return []; })
   ]);
-  const labelOf = id => spaces.find(s => s.id === id)?.label || id;
+  const labelOf = id => allSpaces.find(s => s.id === id)?.label || id;
   return {
     connections: connections.map(c => ({
       row: c.row,
@@ -362,7 +393,7 @@ async function automationsDialogData(email) {
       spaceLabel: labelOf(c.spaceId),
       url: n8n.inboundUrl(c.code)
     })),
-    spaces
+    spaces: userSpaces
   };
 }
 
@@ -935,6 +966,13 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               return res.json(w.closeDialog('⚠️ The N8N link must be a URL (https://…) — nothing was connected.'));
             }
             try {
+              // v2.10.2 security check — the dropdown already only OFFERS the
+              // user's own spaces, but the submit value could be forged, so
+              // membership is verified independently here (fail-closed).
+              const member = await isSpaceMember(spaceId, email);
+              if (!member) {
+                return res.json(w.closeDialog('⛔ You can only connect spaces you are a member of yourself — nothing was connected.'));
+              }
               const result = await n8n.claimCode({ code, link, spaceId, email, name });
               if (result === 'bad_code') {
                 return res.json(w.closeDialog('⛔ That connector code is not valid. Codes come from IT — ask in #it-support.'));
@@ -947,12 +985,23 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
               await postMessageToSpace(spaceId, {
                 text: `🔌 ✅ *${name}* — this space is now connected to an N8N workflow via the Kitten (set up by ${email}). Reports will appear here.`
               }).catch(err => console.error('❌ n8n test post failed:', err.message));
+              // v2.10.3: the secret is NOT posted into the chat — it is parked
+              // in RAM for the one-time "🔐 Reveal secret" popup.
+              storePendingSecret(email, name, result.secret);
               console.log(`🔌 N8N connection "${name}" established by ${email} → ${spaceId}`);
-              return res.json(w.newMessage(buildN8nConnectedMessage(name, n8n.inboundUrl(code), spaceLabel, result.secret)));
+              return res.json(w.newMessage(buildN8nConnectedMessage(name, n8n.inboundUrl(code), spaceLabel)));
             } catch (err) {
               console.error('❌ n8n setup failed:', err.message);
               return res.json(w.closeDialog('😿 Something went wrong connecting — please try again or tell Marcus Gallein (IT).'));
             }
+          }
+
+          // 🔐 One-time secret reveal (v2.10.3): opens an EPHEMERAL dialog —
+          // dialogs are never stored in the chat history. takePendingSecret
+          // deletes on read, so this works exactly once per connection.
+          case 'n8n_reveal_secret': {
+            const pending = takePendingSecret(ev.user?.email);
+            return res.json(w.openDialog(buildSecretRevealCardObject(pending?.name, pending?.secret)));
           }
 
           // 🛠️ Admin: generate a fresh single-use connector code
