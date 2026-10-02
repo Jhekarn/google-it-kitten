@@ -334,13 +334,15 @@ app.get('/jobs/:job', async (req, res) => {
   }
 });
 
-// ---- 🔌 N8N inbound webhook (v2.10.0) ----
-// N8N workflows POST here with the connector code in the URL. No Google auth
-// on this route — the code IS the credential (validated against the central
-// N8N sheet; unknown/unclaimed/revoked codes get a plain 404, posts only
-// ever go to the space stored at setup time, 20/min rate limit per code).
+// ---- 🔌 N8N inbound webhook (v2.10.0, header secret since v2.10.1) ----
+// N8N workflows POST here with the connector code in the URL and the
+// per-connection secret in the X-Kitten-Secret header. No Google auth on
+// this route — code + secret are the credentials (validated against the
+// central N8N sheet; unknown/unclaimed/revoked codes get a plain 404, a
+// missing/wrong secret a 401, posts only ever go to the space stored at
+// setup time, 20/min rate limit per code).
 app.post('/n8n/:code', async (req, res) => {
-  const r = await n8n.handleIncoming(req.params.code, req.body);
+  const r = await n8n.handleIncoming(req.params.code, req.body, req.headers['x-kitten-secret']);
   return res.status(r.status).send(r.text);
 });
 
@@ -946,7 +948,7 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
                 text: `🔌 ✅ *${name}* — this space is now connected to an N8N workflow via the Kitten (set up by ${email}). Reports will appear here.`
               }).catch(err => console.error('❌ n8n test post failed:', err.message));
               console.log(`🔌 N8N connection "${name}" established by ${email} → ${spaceId}`);
-              return res.json(w.newMessage(buildN8nConnectedMessage(name, n8n.inboundUrl(code), spaceLabel)));
+              return res.json(w.newMessage(buildN8nConnectedMessage(name, n8n.inboundUrl(code), spaceLabel, result.secret)));
             } catch (err) {
               console.error('❌ n8n setup failed:', err.message);
               return res.json(w.closeDialog('😿 Something went wrong connecting — please try again or tell Marcus Gallein (IT).'));
