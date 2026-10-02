@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.10.1';
+const KITTEN_VERSION = '2.10.2';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
@@ -552,7 +552,8 @@ function buildSettingsCardObject(settings, tab = 'reminders') {
 // THIS user (with revoke buttons) and the setup form for a new one. Data is
 // loaded server-side and passed in: { connections, spaces }.
 //   connections: [{ row, name, spaceLabel, created, url }]
-//   spaces:      [{ id, label }] — spaces the Kitten is a member of
+//   spaces:      [{ id, label }] — spaces BOTH the Kitten AND the user are
+//                members of (v2.10.2 — membership-filtered server-side)
 const AUTOMATION_TABS = [
   { id: 'existing', label: '🔗 Existing connections' },
   { id: 'setup',    label: '➕ Set up new connection' }
@@ -603,7 +604,7 @@ function automationsTabContent(tab, data) {
       });
       widgets.push({
         textParagraph: {
-          text: '<font color="#80868B">Only spaces I\'m a member of are listed — missing one? Add me to that space first, then reopen this dialog. Reports will ONLY ever go to the space you pick here.</font>'
+          text: '<font color="#80868B">Only spaces BOTH you and I are members of are listed — missing one? Make sure you\'re in the space, add me to it too, then reopen this dialog. Reports will ONLY ever go to the space you pick here.</font>'
         }
       });
       widgets.push({
@@ -612,7 +613,7 @@ function automationsTabContent(tab, data) {
     } else {
       widgets.push({
         textParagraph: {
-          text: '⚠️ I\'m not a member of any space yet — add me to the target space first, then reopen this dialog.'
+          text: '⚠️ I don\'t see a space we\'re BOTH members of — make sure you\'re in the target space, add me to it as well, then reopen this dialog.'
         }
       });
     }
