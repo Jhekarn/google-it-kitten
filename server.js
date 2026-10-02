@@ -28,6 +28,9 @@ const {
   buildJiraDialogCardObject,
   buildTicketCreatedMessage,
   buildSettingsCardObject,
+  buildAutomationsCardObject,
+  buildN8nConnectedMessage,
+  buildN8nCodeMessage,
   buildFunctionsCardObject,
   buildMyRemindersCardObject,
   buildAdminCardObject,
@@ -48,7 +51,8 @@ const { createJiraTicket } = require('./Jira');
 const { getUserOpenTickets, buildMyTicketsPage } = require('./Jira-MyTickets');
 const { runWeeklyReport } = require('./IH-Project-Satisfaction-WeeklyReport');
 const { run: runDailyReminder } = require('./IH-Customer-Waiting-Reminder');
-const { postOps, postToSpace: postToSpaceViaPoster, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
+const { postOps, postToSpace: postToSpaceViaPoster, postMessageToSpace, listKittenSpaces, sendDm, getUserInfo, listDomainUsers } = require('./Chat-Poster');
+const n8n = require('./N8N-Connector');
 const { askKitten, isEnabled: geminiEnabled } = require('./Gemini-Handler');
 const { createBrain, rememberFact, getMemories, getBrain, getSettings, setSettings, isAdmin } = require('./Kitten-Brain');
 const { createTask, runDailyTaskDigest, berlinHour } = require('./Kitten-Tasks');
@@ -127,10 +131,10 @@ const ANNOUNCEMENTS = {
     text: (firstName) =>
       `Hey ${firstName || 'there'} 🧠 I learned a new trick — I can now *remember things, just for you*!\n\n` +
       `Type *kitten* and click *🧠 Create Kitten Brain*. From then on, start any message with ` +
-      `*remember* (e.g. "remember I use a MacBook Pro") and I’ll keep it in mind whenever we chat. ` +
+      `*remember* (e.g. "remember I use a MacBook Pro") and I'll keep it in mind whenever we chat. ` +
       `To make me forget something, just open your memory sheet and delete the row.\n\n` +
       `🔒 Your memories live in YOUR own Google Drive — nobody else can see them, ` +
-      `and they’re only ever used in your own conversations with me. 🐾`
+      `and they're only ever used in your own conversations with me. 🐾`
   },
   'announce-tasks': {
     label: '⏰ Reminders & Tasks announcement',
@@ -224,6 +228,8 @@ cron.schedule('* * * * *', async () => {
 
 const app = express();
 app.use(express.json());
+// N8N workflows may also send raw text bodies to /n8n/<code> (JSON stays the default)
+app.use(express.text({ type: 'text/*', limit: '16kb' }));
 
 // Request log (set ENABLE_DEBUG_EVENTS=1 in env to also dump full payloads)
 app.use((req, _res, next) => {
@@ -327,6 +333,36 @@ app.get('/jobs/:job', async (req, res) => {
     return res.status(500).send(`❌ Job failed: ${err.message}`);
   }
 });
+
+// ---- 🔌 N8N inbound webhook (v2.10.0) ----
+// N8N workflows POST here with the connector code in the URL. No Google auth
+// on this route — the code IS the credential (validated against the central
+// N8N sheet; unknown/unclaimed/revoked codes get a plain 404, posts only
+// ever go to the space stored at setup time, 20/min rate limit per code).
+app.post('/n8n/:code', async (req, res) => {
+  const r = await n8n.handleIncoming(req.params.code, req.body);
+  return res.status(r.status).send(r.text);
+});
+
+// Assemble the data for the 🔌 Automations dialog: this user's connections
+// (with space names + their inbound URLs) and the spaces the Kitten is in.
+async function automationsDialogData(email) {
+  const [connections, spaces] = await Promise.all([
+    n8n.listUserConnections(email).catch(err => { console.error('❌ n8n list failed:', err.message); return []; }),
+    listKittenSpaces().catch(err => { console.error('❌ space list failed:', err.message); return []; })
+  ]);
+  const labelOf = id => spaces.find(s => s.id === id)?.label || id;
+  return {
+    connections: connections.map(c => ({
+      row: c.row,
+      name: c.name,
+      created: c.created,
+      spaceLabel: labelOf(c.spaceId),
+      url: n8n.inboundUrl(c.code)
+    })),
+    spaces
+  };
+}
 
 // ---- Slash command IDs (must match the Chat API console config) ----
 const COMMANDS = {
@@ -851,6 +887,89 @@ app.post('/chat', chatAuthMiddleware(), async (req, res) => {
             } catch (err) {
               console.error('❌ Admin test DM failed:', err.message);
               return res.json(w.closeDialog(`❌ Test DM failed: ${err.message}`));
+            }
+          }
+
+          // 🔌 Automations dialog (N8N → space reports, v2.10.0)
+          case 'open_automations': {
+            if (!n8n.isConfigured()) {
+              return res.json(w.updateMessage(buildHelpMessage(
+                '🔌 Automations are not available yet — the N8N connections sheet is not configured. Please tell Marcus Gallein (IT).', [], hasBrain, adminUser)));
+            }
+            const data = await automationsDialogData(ev.user?.email);
+            // no connections yet → open straight on the setup tab
+            return res.json(w.openDialog(buildAutomationsCardObject(data, data.connections.length ? 'existing' : 'setup')));
+          }
+
+          case 'automations_tab': {
+            const data = await automationsDialogData(ev.user?.email);
+            const tab = ['existing', 'setup'].includes(ev.params?.tab) ? ev.params.tab : 'existing';
+            return res.json(w.updateDialog(buildAutomationsCardObject(data, tab)));
+          }
+
+          // 🗑️ revoke one of the user's own connections (marks the row, never deletes)
+          case 'n8n_revoke': {
+            const row = Number(ev.params?.row);
+            if (row) {
+              await n8n.revokeByRow(row, ev.user?.email)
+                .catch(err => console.error('❌ n8n revoke failed:', err.message));
+            }
+            const data = await automationsDialogData(ev.user?.email);
+            return res.json(w.updateDialog(buildAutomationsCardObject(data, 'existing')));
+          }
+
+          // ➕ claim a connector code and establish the connection
+          case 'n8n_setup_submit': {
+            const code = (ev.formInputs?.n8n_code?.stringInputs?.value?.[0] || '').trim();
+            const name = (ev.formInputs?.n8n_name?.stringInputs?.value?.[0] || '').trim().slice(0, 60);
+            const link = (ev.formInputs?.n8n_link?.stringInputs?.value?.[0] || '').trim();
+            const spaceId = ev.formInputs?.n8n_space?.stringInputs?.value?.[0] || '';
+            const email = ev.user?.email;
+            if (!email) return res.json(w.closeDialog('❌ Could not determine your email address — nothing was connected.'));
+            if (!code || !name || !link || !spaceId) {
+              return res.json(w.closeDialog('⚠️ Please fill in the code, a name, the N8N link AND pick a space — nothing was connected.'));
+            }
+            if (!/^https?:\/\//i.test(link)) {
+              return res.json(w.closeDialog('⚠️ The N8N link must be a URL (https://…) — nothing was connected.'));
+            }
+            try {
+              const result = await n8n.claimCode({ code, link, spaceId, email, name });
+              if (result === 'bad_code') {
+                return res.json(w.closeDialog('⛔ That connector code is not valid. Codes come from IT — ask in #it-support.'));
+              }
+              if (result === 'claimed') {
+                return res.json(w.closeDialog('⛔ That connector code was already used — each code works exactly once. Ask IT for a fresh one.'));
+              }
+              const spaces = await listKittenSpaces().catch(() => []);
+              const spaceLabel = spaces.find(s => s.id === spaceId)?.label || spaceId;
+              await postMessageToSpace(spaceId, {
+                text: `🔌 ✅ *${name}* — this space is now connected to an N8N workflow via the Kitten (set up by ${email}). Reports will appear here.`
+              }).catch(err => console.error('❌ n8n test post failed:', err.message));
+              console.log(`🔌 N8N connection "${name}" established by ${email} → ${spaceId}`);
+              return res.json(w.newMessage(buildN8nConnectedMessage(name, n8n.inboundUrl(code), spaceLabel)));
+            } catch (err) {
+              console.error('❌ n8n setup failed:', err.message);
+              return res.json(w.closeDialog('😿 Something went wrong connecting — please try again or tell Marcus Gallein (IT).'));
+            }
+          }
+
+          // 🛠️ Admin: generate a fresh single-use connector code
+          case 'admin_n8n_code': {
+            if (!adminUser) return res.json(w.closeDialog('⛔ Admins only.'));
+            const key = (ev.formInputs?.admin_n8n_key?.stringInputs?.value?.[0] || '').trim();
+            if (!process.env.ADMIN_JOB_KEY || key !== process.env.ADMIN_JOB_KEY) {
+              return res.json(w.closeDialog('⛔ Wrong security key — no code was generated.'));
+            }
+            if (!n8n.isConfigured()) {
+              return res.json(w.closeDialog('⚠️ N8N_SHEET_ID is not set on the server — create the sheet first (see docs).'));
+            }
+            try {
+              const code = await n8n.generateCode();
+              console.log(`🔌 Admin ${ev.user?.email} generated an N8N connector code.`);
+              return res.json(w.newMessage(buildN8nCodeMessage(code)));
+            } catch (err) {
+              console.error('❌ n8n code generation failed:', err.message);
+              return res.json(w.closeDialog(`❌ Could not write to the N8N sheet: ${err.message}`));
             }
           }
 
