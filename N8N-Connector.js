@@ -5,7 +5,7 @@
 //   N8N (HTTP node)  --POST-->  https://<kitten>/n8n/<connector-code>  --> Google Space
 //
 // Connections live in ONE central Google Sheet (IT + service account only,
-// NEVER shared with regular users). Tab "CONNECTIONS", columns A–G:
+// NEVER shared with regular users). Tab "CONNECTIONS", columns A–H:
 //
 //   A code        — the connector code. Created FIRST by IT (🛠️ Admin →
 //                   Generate connector code) and handed to the requester.
@@ -21,6 +21,13 @@
 //   G status      — 'active' or 'revoked'. The Kitten NEVER deletes rows;
 //                   revoking (user dialog or IT clearing the cell) keeps the
 //                   audit trail. IT can also simply delete the row.
+//   H secret      — per-connection request secret (v2.10.1), generated at
+//                   claim time and shown ONCE to the owner. Every incoming
+//                   call must send it as the X-Kitten-Secret header — a
+//                   leaked URL alone is useless. IT never sees it in transit
+//                   (it never travels through a chat besides the owner's
+//                   confirmation card). Rows without a secret (claimed before
+//                   v2.10.1) keep working without the header.
 //
 // Env: N8N_SHEET_ID (the sheet's ID) + the usual service-account credentials.
 // Security model: the code exists in the sheet BEFORE any user can connect
@@ -48,7 +55,7 @@ let cache = { rows: null, at: 0 };
 
 function bustCache() { cache = { rows: null, at: 0 }; }
 
-// rows: [{ row, code, link, spaceId, email, created, name, status }]
+// rows: [{ row, code, link, spaceId, email, created, name, status, secret }]
 async function loadConnections(fresh = false) {
   if (!isConfigured()) throw new Error('N8N_SHEET_ID not set in env');
   if (!fresh && cache.rows && Date.now() - cache.at < CACHE_MS) return cache.rows;
@@ -56,7 +63,7 @@ async function loadConnections(fresh = false) {
   const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.N8N_SHEET_ID,
-    range: `${TAB}!A2:G`
+    range: `${TAB}!A2:H`
   });
   const rows = (res.data.values || []).map((v, i) => ({
     row: i + 2,
@@ -66,7 +73,8 @@ async function loadConnections(fresh = false) {
     email: (v[3] || '').trim().toLowerCase(),
     created: (v[4] || '').trim(),
     name: (v[5] || '').trim(),
-    status: (v[6] || '').trim().toLowerCase()
+    status: (v[6] || '').trim().toLowerCase(),
+    secret: (v[7] || '').trim()
   })).filter(r => r.code);
   cache = { rows, at: Date.now() };
   return rows;
@@ -80,7 +88,7 @@ async function listUserConnections(email) {
 }
 
 // ---- setup: claim a code ----
-// Returns 'bad_code' | 'claimed' | {row, ...} on success.
+// Returns 'bad_code' | 'claimed' | {row, ..., secret} on success.
 async function claimCode({ code, link, spaceId, email, name }) {
   const rows = await loadConnections(true); // fresh — never claim on stale data
   const hit = rows.find(r => r.code === code);
@@ -88,15 +96,18 @@ async function claimCode({ code, link, spaceId, email, name }) {
   if (hit.spaceId) return 'claimed';        // single-use: already bound
 
   const created = new Date().toISOString().slice(0, 10);
+  // Per-connection request secret (v2.10.1): generated HERE, so IT never sees
+  // it — it exists only in the sheet and the owner's confirmation card.
+  const secret = 'KS-' + crypto.randomBytes(16).toString('hex');
   const sheets = getSheetsClient();
   await sheets.spreadsheets.values.update({
     spreadsheetId: process.env.N8N_SHEET_ID,
-    range: `${TAB}!B${hit.row}:G${hit.row}`,
+    range: `${TAB}!B${hit.row}:H${hit.row}`,
     valueInputOption: 'RAW',
-    requestBody: { values: [[link, spaceId, email.toLowerCase(), created, name, 'active']] }
+    requestBody: { values: [[link, spaceId, email.toLowerCase(), created, name, 'active', secret]] }
   });
   bustCache();
-  return { row: hit.row, code, link, spaceId, email, created, name };
+  return { row: hit.row, code, link, spaceId, email, created, name, secret };
 }
 
 // ---- revoke (user dialog) — marks the row, never deletes it ----
@@ -154,9 +165,20 @@ function rateLimited(code) {
   return r.count > RATE_MAX;
 }
 
+// Timing-safe secret comparison (v2.10.1) — length mismatch handled first,
+// then constant-time compare so the secret can't be guessed byte by byte.
+function secretMatches(sent, stored) {
+  const a = Buffer.from(String(sent || ''));
+  const b = Buffer.from(String(stored || ''));
+  return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
+}
+
 // Returns { status, text } for the HTTP response. Unknown/revoked/unclaimed
-// codes all answer a plain 404 — no hints for guessers.
-async function handleIncoming(code, body) {
+// codes all answer a plain 404 — no hints for guessers. `secretHeader` is the
+// X-Kitten-Secret request header (v2.10.1): REQUIRED whenever the connection
+// has a secret stored (all connections claimed since v2.10.1); checked AFTER
+// the rate limit so it cannot be brute-forced.
+async function handleIncoming(code, body, secretHeader) {
   if (!isConfigured()) return { status: 404, text: 'Not found' };
 
   let conn;
@@ -169,6 +191,9 @@ async function handleIncoming(code, body) {
   }
   if (!conn) return { status: 404, text: 'Not found' };
   if (rateLimited(code)) return { status: 429, text: 'Too many requests — max 20/minute per connection' };
+  if (conn.secret && !secretMatches(secretHeader, conn.secret)) {
+    return { status: 401, text: 'Missing or wrong X-Kitten-Secret header' };
+  }
 
   let title = '', text = '';
   if (typeof body === 'string') {
