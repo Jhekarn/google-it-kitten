@@ -1,4 +1,4 @@
-// N8N-Connector.js — user-configurable N8N → Kitten → Google Space reporting (v2.10.0).
+// N8N-Connector.js — user-configurable N8N → Kitten → Google Space reporting (v2.10.0)..
 //
 // Any N8N workflow that should report somewhere can call the Kitten instead:
 //
