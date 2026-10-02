@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.9.1';
+const KITTEN_VERSION = '2.10.0';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
@@ -88,6 +88,7 @@ function menuButtons(hasBrain = false, isAdmin = false) {
     { text: '📅 Plan a meeting',               functionName: 'open_meeting_planner', opensDialog: true },
     { text: hasBrain ? '🧠 Gogo Kitten Brain' : '🧠 Create Kitten Brain', functionName: 'create_brain' }, // per-user private memory
     { text: '⏱️ My reminders',                 functionName: 'open_my_reminders', opensDialog: true },
+    { text: '🔌 Automations',                  functionName: 'open_automations', opensDialog: true }, // N8N → space reports (v2.10.0)
     { text: '❓ What can I do?',               functionName: 'show_functions', opensDialog: true },
     { text: '⚙️ Settings',                     functionName: 'open_settings', opensDialog: true }
   ];
@@ -546,10 +547,220 @@ function buildSettingsCardObject(settings, tab = 'reminders') {
   };
 }
 
+// ---------- 🔌 Automations dialog (N8N → space reports, v2.10.0) ----------
+// Two tabs, same side-nav pattern as ⚙️ Settings: existing connections of
+// THIS user (with revoke buttons) and the setup form for a new one. Data is
+// loaded server-side and passed in: { connections, spaces }.
+//   connections: [{ row, name, spaceLabel, created, url }]
+//   spaces:      [{ id, label }] — spaces the Kitten is a member of
+const AUTOMATION_TABS = [
+  { id: 'existing', label: '🔗 Existing connections' },
+  { id: 'setup',    label: '➕ Set up new connection' }
+];
+
+function automationsTabContent(tab, data) {
+  if (tab === 'setup') {
+    const widgets = [
+      {
+        textParagraph: {
+          text:
+            '<b>➕ Connect an N8N workflow</b>\n' +
+            'Any N8N automation can report into a Google space through me. You need a ' +
+            '<b>connector code</b> from IT (ask in #it-support) — one code per connection. ' +
+            'After connecting you get a webhook URL to paste into your N8N workflow\'s HTTP node.'
+        }
+      },
+      {
+        textInput: {
+          label: '🔑 Connector code (from IT)',
+          type: 'SINGLE_LINE',
+          name: 'n8n_code'
+        }
+      },
+      {
+        textInput: {
+          label: '🏷️ Name for this connection (shown as the report header)',
+          type: 'SINGLE_LINE',
+          name: 'n8n_name'
+        }
+      },
+      {
+        textInput: {
+          label: '🔗 Link to the N8N workflow (for reference)',
+          type: 'SINGLE_LINE',
+          name: 'n8n_link'
+        }
+      }
+    ];
+    if (data.spaces.length) {
+      widgets.push({
+        selectionInput: {
+          name: 'n8n_space',
+          type: 'DROPDOWN',
+          label: '📢 Report into which space?',
+          items: data.spaces.slice(0, 100).map((s, i) => ({ text: s.label, value: s.id, selected: i === 0 }))
+        }
+      });
+      widgets.push({
+        textParagraph: {
+          text: '<font color="#80868B">Only spaces I\'m a member of are listed — missing one? Add me to that space first, then reopen this dialog. Reports will ONLY ever go to the space you pick here.</font>'
+        }
+      });
+      widgets.push({
+        buttonList: { buttons: [{ text: '🔌 Connect', onClick: buttonAction('n8n_setup_submit') }] }
+      });
+    } else {
+      widgets.push({
+        textParagraph: {
+          text: '⚠️ I\'m not a member of any space yet — add me to the target space first, then reopen this dialog.'
+        }
+      });
+    }
+    return widgets;
+  }
+
+  // default: existing connections
+  const widgets = [];
+  if (!data.connections.length) {
+    widgets.push({
+      textParagraph: {
+        text:
+          'You have no N8N connections yet. 🔌\n\n' +
+          'Switch to <b>➕ Set up new connection</b> to let one of your N8N workflows ' +
+          'report into a Google space through me — you\'ll need a connector code from IT.'
+      }
+    });
+  } else {
+    widgets.push({ textParagraph: { text: 'Your active N8N connections — each one posts into its space through me:' } });
+    for (const c of data.connections) {
+      widgets.push({
+        decoratedText: {
+          topLabel: `since ${c.created}`,
+          text: `<b>${c.name}</b>\n→ ${c.spaceLabel}\n<font color="#80868B">${c.url}</font>`,
+          wrapText: true,
+          button: {
+            text: '🗑️ Revoke',
+            onClick: buttonAction('n8n_revoke', false, [{ key: 'row', value: String(c.row) }])
+          }
+        }
+      });
+    }
+    widgets.push({
+      textParagraph: {
+        text: '<font color="#80868B">Revoking stops delivery within a minute. The URL above is what your N8N workflow calls (POST, JSON {"title","text"} or plain text).</font>'
+      }
+    });
+  }
+  return widgets;
+}
+
+function buildAutomationsCardObject(data, tab = 'existing') {
+  const navWidgets = [{
+    buttonList: {
+      buttons: AUTOMATION_TABS.map(t => ({
+        text: t.id === tab ? `▸ ${t.label}` : t.label,
+        disabled: t.id === tab,
+        onClick: buttonAction('automations_tab', false, [{ key: 'tab', value: t.id }])
+      }))
+    }
+  }];
+  return {
+    sections: [
+      {
+        header: '🔌 Automations (N8N)',
+        widgets: [
+          {
+            columns: {
+              columnItems: [
+                {
+                  horizontalSizeStyle: 'FILL_MINIMUM_SPACE',
+                  horizontalAlignment: 'START',
+                  verticalAlignment: 'TOP',
+                  widgets: navWidgets
+                },
+                {
+                  horizontalSizeStyle: 'FILL_AVAILABLE_SPACE',
+                  horizontalAlignment: 'START',
+                  verticalAlignment: 'TOP',
+                  widgets: automationsTabContent(tab, data)
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  };
+}
+
+// Posted into the chat after a successful setup (also closes the dialog):
+// confirmation + the inbound URL to paste into the N8N workflow.
+function buildN8nConnectedMessage(name, url, spaceLabel) {
+  return {
+    text: `✅ N8N connection "${name}" established`,
+    cardsV2: [{
+      cardId: 'n8n_connected',
+      card: {
+        sections: [{
+          widgets: [
+            {
+              textParagraph: {
+                text:
+                  `✅ <b>${name}</b> is connected — I posted a test message into <b>${spaceLabel}</b>.\n\n` +
+                  `Paste this URL into your N8N workflow's <b>HTTP Request node</b> (method POST, ` +
+                  `body JSON like {"title":"optional","text":"your report"} — or just plain text):`
+              }
+            },
+            { textParagraph: { text: `<b>${url}</b>` } },
+            {
+              textParagraph: {
+                text:
+                  '<font color="#80868B">Treat the URL like a password — whoever has it can post into that space. ' +
+                  'Manage or revoke it any time: menu → 🔌 Automations.</font>'
+              }
+            }
+          ]
+        }]
+      }
+    }]
+  };
+}
+
+// Posted to the admin after generating a connector code (🛠️ Admin area).
+function buildN8nCodeMessage(code) {
+  return {
+    text: `🔌 New N8N connector code generated`,
+    cardsV2: [{
+      cardId: 'n8n_code',
+      card: {
+        sections: [{
+          widgets: [
+            {
+              textParagraph: {
+                text:
+                  '🔌 Fresh connector code — share it with the requester (DM, not in a space!):'
+              }
+            },
+            { textParagraph: { text: `<b>${code}</b>` } },
+            {
+              textParagraph: {
+                text:
+                  '<font color="#80868B">Single-use: the first person to connect with it claims it. ' +
+                  'They connect via menu → 🔌 Automations → ➕ Set up new connection. ' +
+                  'Revoke any time by clearing its status cell (or deleting the row) in the N8N sheet.</font>'
+              }
+            }
+          ]
+        }]
+      }
+    }]
+  };
+}
+
 // ---------- 📅 "Plan a meeting" dialog (side navigation) ----------
 // Two pages: Create event (title, start, duration, guests, description) and
-// Find a time (range day/week, date, duration, guests → free-slot suggestions).
-// A Google Meet link is attached automatically; guests get normal invitations.
+// Find a time (date, duration, guests → free-slot suggestions). A Google
+// Meet link is attached automatically; guests get normal Google invitations.
 const MEETING_TABS = [
   { id: 'create', label: '📅 Create event' },
   { id: 'find',   label: '🔎 Find a time' }
@@ -873,6 +1084,7 @@ function functionsTabContent(tab, settings, hasBrain) {
           '📅 <b>Plan a meeting</b> — create calendar events (auto Meet link) or find a time when all guests are free (one day or the whole week)\n' +
           '🧠 <b>Create / Gogo Kitten Brain</b> — your private memory\n' +
           '⏱️ <b>My reminders</b> — see & cancel your one-off reminders\n' +
+          '🔌 <b>Automations</b> — let your N8N workflows report into a Google space through me\n' +
           '❓ <b>What can I do?</b> — this overview\n' +
           '⚙️ <b>Settings</b> — Reminder Settings & Meeting Settings\n\n' +
           '📚 Plus the <b>FAQ live search</b> field at the top of the menu.'
@@ -1031,6 +1243,30 @@ function buildAdminCardObject(jobs, selectedJob, previewText) {
           {
             buttonList: {
               buttons: [{ text: '📢 Send broadcast to everyone', onClick: buttonAction('admin_send_custom') }]
+            }
+          }
+        ]
+      },
+      {
+        header: '🔌 N8N connector codes',
+        widgets: [
+          {
+            textParagraph: {
+              text:
+                '<font color="#80868B">Generates a fresh single-use connector code in the N8N sheet ' +
+                'and DMs it to you — share it with the requester. They connect via 🔌 Automations.</font>'
+            }
+          },
+          {
+            textInput: {
+              label: '🔑 Security key',
+              type: 'SINGLE_LINE',
+              name: 'admin_n8n_key'
+            }
+          },
+          {
+            buttonList: {
+              buttons: [{ text: '🔌 Generate connector code', onClick: buttonAction('admin_n8n_code') }]
             }
           }
         ]
@@ -1199,6 +1435,9 @@ module.exports = {
   buildJiraDialogCardObject,
   buildTicketCreatedMessage,
   buildSettingsCardObject,
+  buildAutomationsCardObject,
+  buildN8nConnectedMessage,
+  buildN8nCodeMessage,
   buildFunctionsCardObject,
   buildMyRemindersCardObject,
   buildAdminCardObject,
