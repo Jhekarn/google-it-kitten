@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.10.2';
+const KITTEN_VERSION = '2.10.3';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
@@ -695,9 +695,11 @@ function buildAutomationsCardObject(data, tab = 'existing') {
 }
 
 // Posted into the chat after a successful setup (also closes the dialog):
-// confirmation + the inbound URL and the per-connection secret (v2.10.1,
-// shown ONCE — it is not displayed anywhere again) for the N8N HTTP node.
-function buildN8nConnectedMessage(name, url, spaceLabel, secret) {
+// confirmation + the inbound URL. The secret is NOT in this message (v2.10.3)
+// — chat messages live forever in the history, so the secret is delivered
+// through the "🔐 Reveal secret" button instead, which opens an EPHEMERAL
+// dialog exactly once (see buildSecretRevealCardObject / n8n_reveal_secret).
+function buildN8nConnectedMessage(name, url, spaceLabel) {
   return {
     text: `✅ N8N connection "${name}" established`,
     cardsV2: [{
@@ -716,22 +718,73 @@ function buildN8nConnectedMessage(name, url, spaceLabel, secret) {
             { textParagraph: { text: `<b>${url}</b>` } },
             {
               textParagraph: {
-                text: `<b>2 · Header</b> — add a request header named <b>X-Kitten-Secret</b> with this value:`
+                text: `<b>2 · Header</b> — a request header named <b>X-Kitten-Secret</b>. Click below to see its value:`
               }
             },
-            { textParagraph: { text: `<b>${secret || '(no secret — legacy connection)'}</b>` } },
+            {
+              buttonList: {
+                buttons: [
+                  { text: '🔐 Reveal secret (works ONCE)', onClick: buttonAction('n8n_reveal_secret', true) }
+                ]
+              }
+            },
             {
               textParagraph: {
                 text:
-                  '<font color="#80868B">⚠️ This secret is shown ONCE and never again — store it in N8N now. ' +
-                  'Calls without the correct header are rejected, so a leaked URL alone is useless. ' +
-                  'Lost the secret? Revoke this connection and set up a new one. ' +
-                  'Manage or revoke any time: menu → 🔌 Automations.</font>'
+                  '<font color="#80868B">The secret opens in a popup that is never stored anywhere — have N8N ' +
+                  'open and paste it into the header right away. The button works exactly once; afterwards the ' +
+                  'secret exists only in your N8N node (I only keep a fingerprint). Lost it? Revoke this ' +
+                  'connection and set up a new one. Manage or revoke any time: menu → 🔌 Automations.</font>'
               }
             }
           ]
         }]
       }
+    }]
+  };
+}
+
+// The EPHEMERAL one-time secret popup (v2.10.3). Dialogs are not stored in
+// the chat history — closing it removes the plaintext from everywhere except
+// the owner's N8N node. Called with secret = null/undefined when the reveal
+// was already used (or expired / the server restarted).
+function buildSecretRevealCardObject(name, secret) {
+  if (!secret) {
+    return {
+      sections: [{
+        header: '🔐 X-Kitten-Secret',
+        widgets: [{
+          textParagraph: {
+            text:
+              '⚠️ This secret was <b>already revealed</b> (or the reveal expired — it is held for ' +
+              'one hour after connecting).\n\nIf the value is safely stored in your N8N node, all is ' +
+              'well — nothing to do. If you don\'t have it anymore: 🗑️ revoke this connection under ' +
+              '🔌 Automations and set up a new one with a fresh code. For security, the secret is ' +
+              'recoverable by nobody — not even IT.'
+          }
+        }]
+      }]
+    };
+  }
+  return {
+    sections: [{
+      header: `🔐 X-Kitten-Secret for "${name}"`,
+      widgets: [
+        {
+          textParagraph: {
+            text: 'Copy this value into your N8N HTTP Request node — header name <b>X-Kitten-Secret</b>:'
+          }
+        },
+        { textParagraph: { text: `<b>${secret}</b>` } },
+        {
+          textParagraph: {
+            text:
+              '<font color="#80868B">⚠️ Copy it NOW — when you close this popup, it is gone for good. ' +
+              'It is stored nowhere (I keep only a fingerprint to verify incoming calls), so nobody can ' +
+              'show it to you again — not even IT. Lost it later? Revoke + reconnect.</font>'
+          }
+        }
+      ]
     }]
   };
 }
@@ -1448,6 +1501,7 @@ module.exports = {
   buildAutomationsCardObject,
   buildN8nConnectedMessage,
   buildN8nCodeMessage,
+  buildSecretRevealCardObject,
   buildFunctionsCardObject,
   buildMyRemindersCardObject,
   buildAdminCardObject,
