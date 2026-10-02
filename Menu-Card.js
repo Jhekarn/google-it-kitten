@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.10.3';
+const KITTEN_VERSION = '2.10.4';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
