@@ -51,8 +51,9 @@ async function postMessageToSpace(spaceId, message) {
   });
 }
 
-// List the SPACES the Kitten is a member of (no DMs) — feeds the space
-// dropdown of the N8N setup dialog. Paginated; returns [{ id, label }].
+// List the SPACES the Kitten is a member of (no DMs). Paginated; returns
+// [{ id, label }]. Used for labeling; the N8N setup dropdown uses the
+// membership-filtered listUserSpaces() below instead (v2.10.2).
 async function listKittenSpaces() {
   const chat = getChatClient();
   const spaces = [];
@@ -70,6 +71,35 @@ async function listKittenSpaces() {
   } while (pageToken);
   spaces.sort((a, b) => a.label.localeCompare(b.label));
   return spaces;
+}
+
+// Is this user a member of this space? (v2.10.2 — the N8N security check.)
+// Resolves the user's numeric id via the Directory, then asks the Chat API
+// for the membership record spaces/<X>/members/<id>: found = member, 404 =
+// not a member. FAIL-CLOSED: if the id cannot be resolved or the lookup
+// errors, we answer false — nobody gets to see or bind a space we cannot
+// positively verify.
+async function isSpaceMember(spaceId, email) {
+  try {
+    const id = await resolveUserId(email);
+    if (!id) return false; // no Directory resolution → fail closed
+    const chat = getChatClient();
+    await chat.spaces.members.get({ name: `${spaceId}/members/${id}` });
+    return true;
+  } catch (err) {
+    const notFound = err?.code === 404 || err?.response?.status === 404 || /not.?found/i.test(err?.message || '');
+    if (!notFound) console.warn(`⚠️ membership check failed for ${email} in ${spaceId}: ${err.message}`);
+    return false;
+  }
+}
+
+// The spaces BOTH the Kitten AND this user are members of — what the N8N
+// setup dropdown may show (v2.10.2). Checks run in parallel, one membership
+// lookup per Kitten space.
+async function listUserSpaces(email) {
+  const spaces = await listKittenSpaces();
+  const flags = await Promise.all(spaces.map(s => isSpaceMember(s.id, email)));
+  return spaces.filter((_, i) => flags[i]);
 }
 
 // ---- Directory lookup: email → numeric Google user ID ----
@@ -211,4 +241,4 @@ async function postOps(text) {
   }
 }
 
-module.exports = { postToSpace, postMessageToSpace, listKittenSpaces, sendDm, findDmSpace, postOps, getUserInfo, listDomainUsers };
+module.exports = { postToSpace, postMessageToSpace, listKittenSpaces, listUserSpaces, isSpaceMember, sendDm, findDmSpace, postOps, getUserInfo, listDomainUsers };
