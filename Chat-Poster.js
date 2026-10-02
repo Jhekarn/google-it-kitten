@@ -41,6 +41,37 @@ async function postToSpace(spaceId, text) {
   });
 }
 
+// Post a FULL message object (text + cardsV2) into a space — used by the
+// N8N connector (v2.10.0) so automated reports arrive as a tidy card.
+async function postMessageToSpace(spaceId, message) {
+  const chat = getChatClient();
+  await chat.spaces.messages.create({
+    parent: spaceId,
+    requestBody: message
+  });
+}
+
+// List the SPACES the Kitten is a member of (no DMs) — feeds the space
+// dropdown of the N8N setup dialog. Paginated; returns [{ id, label }].
+async function listKittenSpaces() {
+  const chat = getChatClient();
+  const spaces = [];
+  let pageToken;
+  do {
+    const res = await chat.spaces.list({
+      pageSize: 100,
+      pageToken,
+      filter: 'space_type = "SPACE"'
+    });
+    for (const s of res.data?.spaces || []) {
+      spaces.push({ id: s.name, label: s.displayName || s.name });
+    }
+    pageToken = res.data?.nextPageToken;
+  } while (pageToken);
+  spaces.sort((a, b) => a.label.localeCompare(b.label));
+  return spaces;
+}
+
 // ---- Directory lookup: email → numeric Google user ID ----
 // App auth cannot address Chat users by email, only by users/<numeric id>.
 // We resolve the id via the Admin SDK Directory API using domain-wide
@@ -180,4 +211,4 @@ async function postOps(text) {
   }
 }
 
-module.exports = { postToSpace, sendDm, findDmSpace, postOps, getUserInfo, listDomainUsers };
+module.exports = { postToSpace, postMessageToSpace, listKittenSpaces, sendDm, findDmSpace, postOps, getUserInfo, listDomainUsers };
