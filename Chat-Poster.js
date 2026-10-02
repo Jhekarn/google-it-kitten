@@ -84,12 +84,37 @@ async function isSpaceMember(spaceId, email) {
     const id = await resolveUserId(email);
     if (!id) return false; // no Directory resolution → fail closed
     const chat = getChatClient();
-    await chat.spaces.members.get({ name: `${spaceId}/members/${id}` });
-    return true;
+    const res = await chat.spaces.members.get({ name: `${spaceId}/members/${id}` });
+    // v2.10.4: a user who LEFT a space can keep a membership record in state
+    // NOT_A_MEMBER — that must not count. Only an actual membership does.
+    const state = res.data?.state;
+    return state !== 'NOT_A_MEMBER';
   } catch (err) {
     const notFound = err?.code === 404 || err?.response?.status === 404 || /not.?found/i.test(err?.message || '');
     if (!notFound) console.warn(`⚠️ membership check failed for ${email} in ${spaceId}: ${err.message}`);
     return false;
+  }
+}
+
+// Raw membership verdict for ONE space — diagnostics only (v2.10.4, used by
+// the admin /jobs/membership endpoint). Returns a human-readable string with
+// exactly what Google answered, so "member or not?" disputes end with facts.
+async function membershipDetail(spaceId, email) {
+  let id;
+  try {
+    id = await resolveUserId(email);
+  } catch (err) {
+    return `ERROR resolving user id: ${err.message}`;
+  }
+  if (!id) return 'NO DIRECTORY ID (delegation/ADMIN_IMPERSONATE_EMAIL problem → fail-closed everywhere)';
+  try {
+    const chat = getChatClient();
+    const res = await chat.spaces.members.get({ name: `${spaceId}/members/${id}` });
+    return `MEMBER — state=${res.data?.state || '(none)'}, role=${res.data?.role || '(none)'}`;
+  } catch (err) {
+    const notFound = err?.code === 404 || err?.response?.status === 404 || /not.?found/i.test(err?.message || '');
+    if (notFound) return 'NOT A MEMBER (404)';
+    return `ERROR: ${err.message}`;
   }
 }
 
@@ -241,4 +266,4 @@ async function postOps(text) {
   }
 }
 
-module.exports = { postToSpace, postMessageToSpace, listKittenSpaces, listUserSpaces, isSpaceMember, sendDm, findDmSpace, postOps, getUserInfo, listDomainUsers };
+module.exports = { postToSpace, postMessageToSpace, listKittenSpaces, listUserSpaces, isSpaceMember, membershipDetail, sendDm, findDmSpace, postOps, getUserInfo, listDomainUsers };
