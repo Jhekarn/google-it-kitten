@@ -17,7 +17,7 @@ const ACTION_ENDPOINT = process.env.CHAT_APP_AUDIENCE || 'action';
 
 // ---- Version & bug reporting (shown small at the bottom of the menu) ----
 // Bump KITTEN_VERSION with every deploy that changes behavior.
-const KITTEN_VERSION = '2.10.0';
+const KITTEN_VERSION = '2.10.1';
 // Chat cards cannot open the OS mail app, so "Report a Bug" opens a
 // PREFILLED Gmail compose window instead (same result, works for everyone
 // in the Workspace domain).
@@ -647,7 +647,7 @@ function automationsTabContent(tab, data) {
     }
     widgets.push({
       textParagraph: {
-        text: '<font color="#80868B">Revoking stops delivery within a minute. The URL above is what your N8N workflow calls (POST, JSON {"title","text"} or plain text).</font>'
+        text: '<font color="#80868B">Revoking stops delivery within a minute. The URL above is what your N8N workflow calls (POST, JSON {"title","text"} or plain text) — together with its X-Kitten-Secret header, which was shown once at setup. Lost the secret? Revoke + reconnect.</font>'
       }
     });
   }
@@ -694,8 +694,9 @@ function buildAutomationsCardObject(data, tab = 'existing') {
 }
 
 // Posted into the chat after a successful setup (also closes the dialog):
-// confirmation + the inbound URL to paste into the N8N workflow.
-function buildN8nConnectedMessage(name, url, spaceLabel) {
+// confirmation + the inbound URL and the per-connection secret (v2.10.1,
+// shown ONCE — it is not displayed anywhere again) for the N8N HTTP node.
+function buildN8nConnectedMessage(name, url, spaceLabel, secret) {
   return {
     text: `✅ N8N connection "${name}" established`,
     cardsV2: [{
@@ -707,16 +708,24 @@ function buildN8nConnectedMessage(name, url, spaceLabel) {
               textParagraph: {
                 text:
                   `✅ <b>${name}</b> is connected — I posted a test message into <b>${spaceLabel}</b>.\n\n` +
-                  `Paste this URL into your N8N workflow's <b>HTTP Request node</b> (method POST, ` +
-                  `body JSON like {"title":"optional","text":"your report"} — or just plain text):`
+                  `Configure your N8N workflow's <b>HTTP Request node</b> with BOTH of these:\n\n` +
+                  `<b>1 · URL</b> (method POST, body JSON like {"title":"optional","text":"your report"} — or plain text):`
               }
             },
             { textParagraph: { text: `<b>${url}</b>` } },
             {
               textParagraph: {
+                text: `<b>2 · Header</b> — add a request header named <b>X-Kitten-Secret</b> with this value:`
+              }
+            },
+            { textParagraph: { text: `<b>${secret || '(no secret — legacy connection)'}</b>` } },
+            {
+              textParagraph: {
                 text:
-                  '<font color="#80868B">Treat the URL like a password — whoever has it can post into that space. ' +
-                  'Manage or revoke it any time: menu → 🔌 Automations.</font>'
+                  '<font color="#80868B">⚠️ This secret is shown ONCE and never again — store it in N8N now. ' +
+                  'Calls without the correct header are rejected, so a leaked URL alone is useless. ' +
+                  'Lost the secret? Revoke this connection and set up a new one. ' +
+                  'Manage or revoke any time: menu → 🔌 Automations.</font>'
               }
             }
           ]
